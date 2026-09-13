@@ -40,6 +40,25 @@ def _select_data_file(zf: zipfile.ZipFile) -> str:
     return csv_files[0]
 
 
+def _reject_non_data_response(response: requests.Response) -> bytes:
+    """HTTP 200でも、ログイン/エラーページ等のHTML応答を非データとして拒否する。
+
+    未認証アクセスがログインページ等にリダイレクトされてHTTP 200を返すと、
+    raise_for_status() では検出できず、pandasがそのHTMLを空・1行のCSVとして
+    受理してしまうことがある。Content-Typeまたは本文先頭のHTML兆候で弾く。
+    """
+    payload = response.content
+    content_type = response.headers.get("Content-Type", "")
+    if "html" in content_type.lower():
+        raise ValueError(
+            f"データではなくHTMLが返されました(Content-Type: {content_type!r})。"
+            "認証切れ・アクセス拒否等でログイン/エラーページにリダイレクトされた可能性があります。"
+        )
+    if payload.lstrip()[:256].lower().startswith((b"<!doctype html", b"<html")):
+        raise ValueError("データではなくHTMLが返されました。認証切れ・アクセス拒否の可能性があります。")
+    return payload
+
+
 def fetch_option_theoretical_price(
     target_date: dt.date, *, url_template: str = DEFAULT_URL_TEMPLATE, timeout: int = 30
 ) -> pd.DataFrame:
@@ -47,7 +66,7 @@ def fetch_option_theoretical_price(
     url = url_template.format(date=target_date.strftime("%Y%m%d"))
     response = requests.get(url, timeout=timeout)
     response.raise_for_status()
-    payload = response.content
+    payload = _reject_non_data_response(response)
 
     if zipfile.is_zipfile(io.BytesIO(payload)):
         with zipfile.ZipFile(io.BytesIO(payload)) as zf:

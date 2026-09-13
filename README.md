@@ -53,8 +53,11 @@ neutral-carry-engine → topix-index-event-strategy)が4連続NO-GO/KILLとな�
 kabuopu-arb-scan/
 ├── README.md
 ├── requirements.txt
+├── .gitignore
 ├── scripts/
-│   └── fetch_jpx_option_data.py   # JPXオプション理論価格データ取得(URL要確認)
+│   ├── fetch_jpx_option_data.py   # JPXオプション理論価格データ取得(URL要確認)
+│   └── option_arbitrage_scan.py   # 静的無裁定性スキャナ
+├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
 
