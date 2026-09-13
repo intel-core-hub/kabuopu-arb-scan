@@ -1,75 +1,102 @@
-"""
-JPXの「オプション理論価格等情報」を取得するスクリプト(たたき台)。
+"""JPXのオプション理論価格等情報を取得してCSV保存するCLI。
 
-【要確認・未完成】
-2018年時点ではブログ記事で以下のURLパターンでの無料ダウンロードが確認できたが、
-2026年9月時点でJPXの提供方法(URL・料金体系)が同じかどうかは未確認。
-    http://www.jpx.co.jp/markets/derivatives/option-price/data/[ファイル名].zip
-
-現在のJPX公式ページ(下記)はJavaScript必須のため、機械的な取得には
-実際のダウンロードリンクをブラウザの開発者ツール等で確認し、
-DOWNLOAD_URL_TEMPLATE を更新する必要がある。
-    https://www.jpx.co.jp/markets/derivatives/option-price/index.html
-
-かぶオプ(個別株オプション)が本当にこのデータセットに含まれるかも
-未確認(公式ページの説明文では「オプション取引全銘柄」と記載されているため
-含まれる可能性が高いと推測しているだけ)。
+JPXの配信URLは契約・ログイン状態によって変わることがあるため、URLテンプレートは
+コマンドラインまたは環境変数 ``JPX_OPTION_DATA_URL_TEMPLATE`` で指定できる。
+テンプレートでは ``{date}`` (YYYYMMDD) を使用する。
 """
 
-import datetime
+from __future__ import annotations
+
+import argparse
+import datetime as dt
 import io
+import os
+from pathlib import Path
 import zipfile
 
 import pandas as pd
 import requests
 
-# TODO: 実際のURLパターンに要修正(上記コメント参照)
-DOWNLOAD_URL_TEMPLATE = (
-    "https://www.jpx.co.jp/markets/derivatives/option-price/data/{date}.zip"
-)
+DEFAULT_URL_TEMPLATE = "https://www.jpx.co.jp/markets/derivatives/option-price/data/{date}.zip"
 
 
-def fetch_option_theoretical_price(target_date: datetime.date) -> pd.DataFrame:
-    """指定日のオプション理論価格等情報を取得してDataFrameで返す。
+def _read_csv(payload: bytes, name: str) -> pd.DataFrame:
+    """JPX配信で使われうる文字コードと区切り文字を順に試す。"""
+    errors: list[str] = []
+    for encoding in ("cp932", "utf-8-sig", "utf-8"):
+        for sep in (None, ",", "\t"):
+            try:
+                return pd.read_csv(io.BytesIO(payload), encoding=encoding, sep=sep, engine="python")
+            except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+                errors.append(f"{encoding}/{sep}: {exc}")
+    raise ValueError(f"CSV {name!r} を読み込めませんでした。試行結果: {'; '.join(errors)}")
 
-    Parameters
-    ----------
-    target_date : datetime.date
-        取得したい取引日
 
-    Returns
-    -------
-    pd.DataFrame
-        銘柄コード・限月・プレミアム終値・理論価格・IV・対象証券終値等を含む想定。
-        実際のカラム構成はデータを取得してから確認・修正すること。
-    """
-    date_str = target_date.strftime("%Y%m%d")
-    url = DOWNLOAD_URL_TEMPLATE.format(date=date_str)
+def _select_data_file(zf: zipfile.ZipFile) -> str:
+    files = [name for name in zf.namelist() if not name.endswith("/")]
+    csv_files = [name for name in files if name.lower().endswith((".csv", ".txt"))]
+    if not csv_files:
+        raise ValueError(f"ZIPにCSV/TXTファイルがありません: {files}")
+    return csv_files[0]
 
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
 
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        # ZIP内のファイル名は要確認
-        names = zf.namelist()
-        print(f"ZIP内ファイル: {names}")
-        with zf.open(names[0]) as f:
-            df = pd.read_csv(f, encoding="shift_jis")
+def fetch_option_theoretical_price(
+    target_date: dt.date, *, url_template: str = DEFAULT_URL_TEMPLATE, timeout: int = 30
+) -> pd.DataFrame:
+    """指定取引日のデータを取得し、元の列名を保ったDataFrameを返す。"""
+    url = url_template.format(date=target_date.strftime("%Y%m%d"))
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    payload = response.content
 
-    return df
+    if zipfile.is_zipfile(io.BytesIO(payload)):
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            name = _select_data_file(zf)
+            return _read_csv(zf.read(name), name)
+    return _read_csv(payload, url)
 
 
 def filter_kabuopu(df: pd.DataFrame) -> pd.DataFrame:
-    """個別株オプション(かぶオプ)の行だけを抽出する(たたき台)。
+    """商品種別・銘柄名から有価証券（個別株）オプションの候補を抽出する。
 
-    実際のデータを見てから、どの列で日経225/TOPIXオプションと
-    個別株オプションを区別できるかを確認して実装すること。
+    配信元ごとに列名は異なるため、明示的な商品種別列があればそれを優先する。該当列が
+    ない場合は、日経225・TOPIXを除外した上で全行を返す。結果は必ず目視確認すること。
     """
-    raise NotImplementedError("実データ取得後にフィルタ条件を実装してください")
+    product_columns = ("商品種別", "商品", "取引種別", "Product Type", "product_type")
+    name_columns = ("銘柄名", "銘柄名称", "限月取引名称", "Security Name", "name")
+    for column in product_columns:
+        if column in df.columns:
+            values = df[column].astype(str)
+            return df.loc[values.str.contains(r"有価証券|個別株|stock", case=False, regex=True, na=False)].copy()
+    for column in name_columns:
+        if column in df.columns:
+            values = df[column].astype(str)
+            excluded = values.str.contains(r"日経\s*225|TOPIX", case=False, regex=True, na=False)
+            return df.loc[~excluded].copy()
+    return df.copy()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="JPXオプション理論価格等情報を取得する")
+    parser.add_argument("--date", required=True, type=dt.date.fromisoformat, help="取引日 (YYYY-MM-DD)")
+    parser.add_argument("--output", type=Path, help="出力CSV。未指定時は data/ 配下")
+    parser.add_argument("--url-template", default=os.getenv("JPX_OPTION_DATA_URL_TEMPLATE", DEFAULT_URL_TEMPLATE))
+    parser.add_argument("--timeout", type=int, default=30)
+    parser.add_argument("--kabuopu-only", action="store_true", help="個別株オプション候補だけを保存する")
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    df = fetch_option_theoretical_price(args.date, url_template=args.url_template, timeout=args.timeout)
+    if args.kabuopu_only:
+        df = filter_kabuopu(df)
+    output = args.output or Path("data") / f"option_theoretical_price_{args.date:%Y%m%d}.csv"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output, index=False, encoding="utf-8-sig")
+    print(f"{len(df):,} 行を保存しました: {output}")
+    print("列:", ", ".join(map(str, df.columns)))
 
 
 if __name__ == "__main__":
-    today = datetime.date.today()
-    df = fetch_option_theoretical_price(today)
-    print(df.head())
-    df.to_csv(f"data/option_theoretical_price_{today.strftime('%Y%m%d')}.csv", index=False)
+    main()

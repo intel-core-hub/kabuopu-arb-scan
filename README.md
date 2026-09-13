@@ -65,3 +65,46 @@ python -m venv venv
 source venv/bin/activate  # Windowsは venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+## 実装済みのデータ取得・スキャン手順
+
+> **データ提供形態の確認状況:** 実行環境からJPX公式サイトへのHTTPS接続はプロキシで
+> 拒否されたため、2026年9月13日現在の配信URL・料金・個別株オプション収録有無を
+> このリポジトリ内では未検証です。取得スクリプトは旧来の公開URLを既定値として持ち
+> ますが、実運用では契約済みのJPXデータ配信URLを指定してください。
+
+### 1. データを取得する
+
+```bash
+python scripts/fetch_jpx_option_data.py \
+  --date 2026-09-11 \
+  --url-template 'https://<JPX提供URL>/{date}.zip' \
+  --kabuopu-only
+```
+
+URLテンプレートは `JPX_OPTION_DATA_URL_TEMPLATE` 環境変数でも指定できます。ZIP内の
+CSV/TXT（CP932、UTF-8、CSV/TSV）を読み取り、UTF-8 BOM付きCSVとして `data/` に保存
+します。`--kabuopu-only` は商品種別に「有価証券」「個別株」「stock」を含む行を優先し、
+商品種別がない場合は日経225/TOPIX名称を除外する**候補抽出**です。保存結果は必ず
+銘柄コード・商品種別で確認してください。
+
+### 2. 静的無裁定性をスキャンする
+
+```bash
+python scripts/option_arbitrage_scan.py data/option_theoretical_price_20260911.csv \
+  --as-of 2026-09-11 \
+  --output data/arbitrage_findings_20260911.csv
+```
+
+スキャナは標準列 `underlying`, `expiry`, `option_type`, `strike`, `bid`, `ask`,
+`settlement`, `iv`, `spot`、または対応する日本語JPX列名を受け付けます。出力CSVには、
+以下の一次スクリーニング結果を記録します。
+
+- `crossed_spread`: 買気配が売気配を上回る。
+- `butterfly_convexity`: 同一満期・同一種別の権利行使価格に対して価格凸性に反する。
+- `calendar_total_variance`: 同一原資産・権利行使価格・種別で満期が先の総分散が小さい。
+- `put_call_parity`: `C - P - (S - K)` が許容値を超える。これは金利・配当・取引単位を
+  未調整の候補抽出であり、そのまま裁定機会を意味しません。
+
+検出結果は、金利・予想配当・契約乗数・権利落ち・気配の時点差を調整して再計算し、
+IBKR等の板で数量、両建て可否、手数料、レッグ約定リスクを確認してから評価します。
