@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "venue": {
+    "name": "Osaka Exchange securities options",
+    "strategy_trades": "UNAVAILABLE",
+    "verified_date": "2026-09-14",
+    "source": "https://www.jpx.co.jp/english/derivatives/products/individual/securities-options/01.html",
+    "note": "JPX contract specifications currently state Strategy Trades: Unavailable for securities options."
+  },
+  "broker": {
+    "name": "Interactive Brokers",
+    "ose_sso_bag_supported": "UNKNOWN",
+    "ose_sso_route_mode": "UNKNOWN",
+    "ose_sso_execution_guarantee": "UNKNOWN",
+    "verified_date": "2026-09-14",
+    "source": "",
+    "support_case_id": "",
+    "note": "Replace UNKNOWN fields only from an authoritative IBKR response specific to OSE single-stock options. Generic combo documentation is not enough."
+  }
+}
