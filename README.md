@@ -65,8 +65,9 @@ kabuopu-arb-scan/
 ├── PHASE10_NOTES.md               # Phase 10(非原子執行の気配リプレイ)の詳細ドキュメント
 ├── PHASE11_NOTES.md               # Phase 11(OSEリアルタイム/L2 API能力ゲート)の詳細ドキュメント
 ├── PHASE12_NOTES.md               # Phase 12(表示気配タッチの持続性実測)の詳細ドキュメント
+├── PHASE13_NOTES.md               # Phase 13(気配-約定整合性の検証)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13専用の追加依存(ibapi)
 ├── .gitignore
 ├── config/
 │   └── phase9_venue_broker_evidence.example.json # Phase 9証拠JSONのテンプレート
@@ -85,7 +86,9 @@ kabuopu-arb-scan/
 │   ├── simulate_nonatomic_execution.py # レッグ別逐次約定の気配リプレイ(IBKR接続なし)
 │   ├── ibkr_probe_marketdata_capability.py # OSEリアルタイムL1/L2データ能力の読み取り専用プローブ(発注系API一切なし)
 │   ├── ibkr_record_depth_survival.py # OSE L2板情報の読み取り専用記録(発注系API一切なし)
-│   └── analyze_touch_survival.py  # 表示気配タッチの持続性をオフライン分析(IBKR接続なし)
+│   ├── analyze_touch_survival.py  # 表示気配タッチの持続性をオフライン分析(IBKR接続なし)
+│   ├── ibkr_record_touch_depletion.py # 気配枯渇とLast/Last Sizeの読み取り専用記録(発注系API一切なし)
+│   └── analyze_touch_depletion.py # 気配枯渇と約定printの整合性をオフライン分析(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -546,3 +549,60 @@ Phase 10で仮定した500msの逐次レッグ遅延は既に楽観的だった�
 あくまで表示気配の持続性についての証拠であり、新規注文が約定することの証明
 ではありません。詳細は [`PHASE12_NOTES.md`](PHASE12_NOTES.md) を参照して
 ください。
+
+### 14. (Phase 13) 気配枯渇と約定printの整合性を検証する
+
+Phase 12は表示気配が100〜2000ms持続するかを測定しますが、表示サイズの減少が
+約定・取消・置き換え・隠れ流動性・フィード集約・callback順序のどれによる
+ものかまでは分かりません。Phase 13はより狭い第二の観測量「**気配-約定
+整合性**」を追加します。`reqMktData`の通常のストリーミングL1`Last`/`Last
+Size` callbackを直接L2の変化と併せて記録し、不利な気配枯渇の近くに旧タッチ
+価格での約定callbackがあるかを調べます。
+
+一致は「この気配枯渇の近くで約定活動が観測された」ことのみを意味し、意図的に
+**「裏付けあり(corroborated)」**と呼びます。不一致は「取消された」ではなく
+**「裏付けなし(uncorroborated)」**と呼びます。どちらの場合も、仮想的な注文が
+約定する確率を示すものではありません。OSEオプションでリアルタイムの
+`reqTickByTickData`が使えると仮定せず、Phase 11で実証済みの通常のストリーミング
+リクエストを意図的に使っています。
+
+`ibkr_record_touch_depletion.py`(読み取り専用の記録)はPhase 12の
+`TOUCH_SURVIVAL_ROBUST_ENOUGH_FOR_QUEUE_RESEARCH`判定を要求し、各レッグに
+逐次購読してL1`Last`/`Last Size`と直接L2の変化を記録します。**発注・変更・
+取消・グローバルキャンセル・What-Ifは一切使用せず**、`reqTickByTickData`も
+意図的に使いません(市場データ購読のキャンセルのみ)。
+
+`analyze_touch_depletion.py`(完全オフライン)は同一価格でのサイズ減少・
+より不利な価格への移動・同価格での補充を検出し、各枯渇を旧タッチ価格での
+近傍の`Last Size` callbackに貪欲マッチングします(同じ約定printを複数の
+枯渇に二重利用しない)。
+
+```bash
+python scripts/ibkr_record_touch_depletion.py \
+  data/persistence_7203_new.csv \
+  --phase12-summary data/phase12_touch_survival_summary.json \
+  --candidate-id '<candidate-id>' \
+  --duration-per-leg 120 \
+  --depth-rows 5 \
+  --output data/phase13_touch_depletion_events.csv \
+  --summary-json data/phase13_recording_summary.json
+
+python scripts/analyze_touch_depletion.py \
+  data/phase13_touch_depletion_events.csv \
+  --match-window-ms 250 \
+  --min-depletions 5 \
+  --min-corroboration 0.50 \
+  --output data/phase13_touch_depletion_summary.csv \
+  --details-output data/phase13_touch_depletion_events_matched.csv \
+  --summary-json data/phase13_summary.json
+```
+
+最も強い判定`TOUCH_DEPLETION_CORROBORATED_ENOUGH_FOR_LATENCY_STUDY`が意味する
+のは、後続のレイテンシ/到着研究に進む価値があるということだけです。実弾取引を
+許可するものでも、約定確率の推定でもありません。出力は常に
+`phase13_live_money_allowed=False`、`phase13_is_fill_probability=False`、
+`phase13_cancellation_inference_allowed=False`です。裏付け率が低くても
+「取消が多い」と断定せず(callbackの疎密・集約・タイミングのずれ等、複数の
+原因があり得るため)、裏付け率が高くても執行のレイテンシ・キュー優先度・
+マーケットインパクト・実際の約定確率を示すものではありません。詳細は
+[`PHASE13_NOTES.md`](PHASE13_NOTES.md) を参照してください。
