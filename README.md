@@ -52,11 +52,14 @@ neutral-carry-engine → topix-index-event-strategy)が4連続NO-GO/KILLとな�
 ```
 kabuopu-arb-scan/
 ├── README.md
+├── PHASE2_NOTES.md                # Phase 2(気配値ベース検査)の詳細ドキュメント
 ├── requirements.txt
 ├── .gitignore
 ├── scripts/
 │   ├── fetch_jpx_option_data.py   # JPXオプション理論価格データ取得(URL要確認)
-│   └── option_arbitrage_scan.py   # 静的無裁定性スキャナ
+│   ├── option_arbitrage_scan.py   # 理論価格ベースの静的無裁定性スキャナ
+│   ├── fetch_kabuopu_quotes.py    # かぶオプ気配値ボード(15分遅延)取得
+│   └── quote_arbitrage_scan.py    # 気配値(bid/ask)ベースの静的無裁定性スキャナ
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -111,3 +114,20 @@ python scripts/option_arbitrage_scan.py data/option_theoretical_price_20260911.c
 
 検出結果は、金利・予想配当・契約乗数・権利落ち・気配の時点差を調整して再計算し、
 IBKR等の板で数量、両建て可否、手数料、レッグ約定リスクを確認してから評価します。
+
+### 3. (Phase 2) 気配値(bid/ask)ベースで執行可能性を検査する
+
+理論価格は気配のスプレッドを含まないため、実際に約定できる無裁定違反かどうかは
+気配値ベースで別途検査する必要があります。`fetch_kabuopu_quotes.py` が15分遅延の
+かぶオプ気配値ボードを取得し、`quote_arbitrage_scan.py` がクロススプレッド・
+バーティカル・バタフライ・ボックススプレッドを手数料込みで検査します。
+
+```bash
+python scripts/fetch_kabuopu_quotes.py --underlying 7203 --output data/quotes_7203.csv
+python scripts/quote_arbitrage_scan.py data/quotes_7203.csv \
+  --fee-per-contract-leg 100 \
+  --output data/findings_7203.csv
+```
+
+詳細な設計・解釈上の注意点(気配は15分遅延であり検出結果はそのまま裁定機会を
+意味しないこと等)は [`PHASE2_NOTES.md`](PHASE2_NOTES.md) を参照してください。
