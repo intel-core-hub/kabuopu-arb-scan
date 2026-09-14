@@ -69,6 +69,7 @@ kabuopu-arb-scan/
 ├── PHASE14_NOTES.md               # Phase 14(保守的レイテンシ予算オーバーレイ)の詳細ドキュメント
 ├── PHASE15_NOTES.md               # Phase 15(ペーパー注文ライフサイクルのタイミング)の詳細ドキュメント
 ├── PHASE16_NOTES.md               # Phase 16(気配持続性×ペーパー制御パスの重ね合わせ)の詳細ドキュメント
+├── PHASE17_NOTES.md               # Phase 17(同期パッケージレベル気配持続性)の詳細ドキュメント
 ├── requirements.txt
 ├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13/14/15専用の追加依存(ibapi)
 ├── .gitignore
@@ -96,7 +97,8 @@ kabuopu-arb-scan/
 │   ├── analyze_latency_budget.py  # Phase 12/13とRTT往復時間を統合する保守的予算分析(IBKR接続なし)
 │   ├── ibkr_measure_paper_order_lifecycle.py # DU口座限定のペーパー注文ライフサイクル計測(Phase 7の安全機構を再利用)
 │   ├── analyze_paper_order_lifecycle.py # ペーパー注文callbackタイミングをPhase 14予算と比較(IBKR接続なし)
-│   └── analyze_end_to_end_touch_retention.py # Phase 12気配持続性とPhase 15ペーパータイミングを重ね合わせ(IBKR接続なし)
+│   ├── analyze_end_to_end_touch_retention.py # Phase 12気配持続性とPhase 15ペーパータイミングを重ね合わせ(IBKR接続なし)
+│   └── analyze_synchronized_package_survival.py # Phase 4同期サンプルから全レッグ同時の気配持続性を直接測定(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -781,3 +783,53 @@ python scripts/analyze_end_to_end_touch_retention.py \
 レイテンシ・キュー優先度・隠れ流動性・結合レッグ持続性・約定確率・期待損益の
 いずれも証明しません。詳細は [`PHASE16_NOTES.md`](PHASE16_NOTES.md) を
 参照してください。
+
+### 18. (Phase 17) 同期パッケージレベルの気配持続性を測定する
+
+Phase 16はペーパーcallbackタイミング分布を各レッグの**周辺**Phase 12気配持続性に
+重ね合わせ、周辺持続性を掛け合わせる代わりに保守的に最弱レッグを採用しました。
+Phase 17はこの周辺レッグ近似を次の研究ゲートのために取り除きます。候補の
+全レッグが同時にサンプリングされたPhase 4/10の拡張済み`monitor_samples_json`に
+立ち返り、**パッケージ全体の表示実行可能性**が同期サンプリングされたチェック
+ポイントで悪化していないかを直接測定します。
+
+これは意図的に約定モデルより狭い測定です: 複数レッグにまたがる**結合気配
+タッチ指標**であり、サンプル間の連続時間持続性ではなく、取引所到達確率でも
+約定確率でも原子的執行の証拠でもありません。**レッグ間の独立性は一切仮定
+しません**(そもそも同時サンプルを直接見るのでその必要がありません)。
+発注・キャンセルは一切行わず、IBKRへの依存も全くありません(`grep`で
+`ibapi`のimportや発注・気配データAPI呼び出しがないことを確認済み)。
+
+トリガーは`sample_status == LIVE_POSITIVE`かつ全レッグの`leg_snapshots`が
+揃い、実際の`market_data_type`が全レッグでliveで、表示サイズがレッグ数量
+以上のPhase 4サンプルです。各時間軸について、トリガーからその目標時刻以降
+最初のサンプルまでの**全チェックポイント**で、全レッグが依然live・十分な
+サイズ・トリガー時より悪くない価格であることを要求します。目標サンプルの
+オーバーシュートは観測された中央値サンプリング間隔の既定1.5倍までしか許容
+せず、疎なサンプルを精密な観測と誤認しないようにしています。監視ウィンドウ
+終端に近いトリガーは失敗ではなく分母から除外されます。
+
+```bash
+python scripts/analyze_synchronized_package_survival.py \
+  data/phase16_candidates.csv \
+  --phase4-inputs 'data/persistence_*_new.csv' \
+  --horizons-sec 0.5,1,2 \
+  --target-horizon-sec 1 \
+  --min-sessions 3 \
+  --min-complete-triggers-per-session 5 \
+  --min-retention 0.80 \
+  --sessions-output data/phase17_package_sessions.csv \
+  --triggers-output data/phase17_package_triggers.csv \
+  --output data/phase17_package_candidates.csv \
+  --summary-json data/phase17_summary.json
+```
+
+Phase 16の判定が`TOUCH_RETAINS_THROUGH_PAPER_CONTROL_PATH_FOR_NEXT_RESEARCH`
+であることが前提条件です。最も強い判定
+`SYNCHRONIZED_PACKAGE_TOUCH_ROBUST_ENOUGH_FOR_NEXT_RESEARCH`が意味するのは、
+捕捉したPhase 4セッションにおいて、全ての表示実行可能レッグが同期サンプリング
+されたチェックポイントで十分な頻度で悪化しなかった、ということだけです。
+パッケージがチェックポイント間も連続的に執行可能だったこと、取引所に気配
+変化前に注文が到達したこと、全レッグが約定したこと、マーケットインパクト後も
+非原子執行が利益を生むことは一切示しません。詳細は
+[`PHASE17_NOTES.md`](PHASE17_NOTES.md) を参照してください。
