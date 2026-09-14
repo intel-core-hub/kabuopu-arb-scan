@@ -56,8 +56,9 @@ kabuopu-arb-scan/
 ├── PHASE3_NOTES.md                # Phase 3(IBKRライブ再検証)の詳細ドキュメント
 ├── PHASE4_NOTES.md                # Phase 4(同時ストリーミング持続性検査)の詳細ドキュメント
 ├── PHASE5_NOTES.md                # Phase 5(複数セッション再現性ゲート)の詳細ドキュメント
+├── PHASE6_NOTES.md                # Phase 6(IBKR What-If執行可能性調査)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3/4専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4/6専用の追加依存(ibapi)
 ├── .gitignore
 ├── scripts/
 │   ├── fetch_jpx_option_data.py   # JPXオプション理論価格データ取得(URL要確認)
@@ -66,7 +67,8 @@ kabuopu-arb-scan/
 │   ├── quote_arbitrage_scan.py    # 気配値(bid/ask)ベースの静的無裁定性スキャナ
 │   ├── ibkr_validate_findings.py  # IBKRライブ気配での単発再検証(発注は一切行わない)
 │   ├── ibkr_monitor_findings.py   # IBKR同時ストリーミングでの持続性検査(発注は一切行わない)
-│   └── evaluate_persistence.py    # 複数セッションを集計する再現性ゲート(IBKR接続なし)
+│   ├── evaluate_persistence.py    # 複数セッションを集計する再現性ゲート(IBKR接続なし)
+│   └── ibkr_execution_study.py    # IBKR What-Ifプレビューのみ(実発注は一切行わない)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -236,3 +238,46 @@ python scripts/evaluate_persistence.py 'data/persistence_*.csv' \
 過ぎません。約定の非原子性・表示サイズの消失・手数料・証拠金・乗数・権利行使/
 割当メカニズム等は別途必ず検証してください。詳細は
 [`PHASE5_NOTES.md`](PHASE5_NOTES.md) を参照してください。
+
+### 7. (Phase 6) IBKR What-Ifで執行可能性を調査する
+
+Phase 5で `PROMOTE_TO_EXECUTION_STUDY` になった候補について、`ibkr_execution_study.py`
+はさらに狭い3つの問いだけを調べます:IBKRが全レッグを`BAG`として解決し
+**What-Ifプレビュー**を受理するか、想定される手数料・証拠金インパクトはどの程度か、
+そしてPhase 4/5が仮定した手数料をWhat-Ifの実見積りに置き換えてもエッジが正のまま
+残るか。**この段階でも一切発注しません**。唯一の`placeOrder`呼び出しは
+`order.whatIf is True` というハード不変条件で保護されており、CLIのどのオプションを
+使ってもこの値を変えることはできません。IBKRはWhat-If注文を「発注先には送信され
+ないプレビュー/与信チェック」と定義しています。
+
+```bash
+# デフォルトはオフラインのプラン作成のみ(IBKR接続なし)
+python scripts/ibkr_execution_study.py \
+  data/reproducibility_ranking.csv \
+  --phase4-inputs 'data/persistence_*.csv' \
+  --output data/execution_study_plan.csv
+
+# TWS/IB GatewayでAPIが有効な場合のみ、What-Ifプレビューを実行
+python scripts/ibkr_execution_study.py \
+  data/reproducibility_ranking.csv \
+  --phase4-inputs 'data/persistence_*.csv' \
+  --run-whatif \
+  --exchange OSE.JPN \
+  --currency JPY \
+  --limit 5 \
+  --output data/execution_study_whatif.csv
+```
+
+- `PAPER_COMBO_TEST_REQUIRED`: BAGプレビューが受理され、手数料通貨も一致し、
+  実見積りに置き換えても正のエッジが残る場合(原子性は依然`False`のまま)
+- `STOP_COMBO_UNSUPPORTED_OR_REJECTED`: IBKRがBAGプレビューを受理しなかった場合
+- `STOP_EDGE_AFTER_COMMISSION_NONPOSITIVE`: 実手数料見積りでエッジが消失する場合
+- `REVIEW_WHATIF_WARNINGS` / `REVIEW_WHATIF_INCOMPLETE` / `REVIEW_COMMISSION_CURRENCY` /
+  `REVIEW_WHATIF_TIMEOUT`: 個別に要確認な状態
+- `WHATIF_PREVIEW_REQUIRED`: プラン作成のみでブローカーへの問い合わせ未実施
+
+JPXの有価証券オプションは現時点で「ストラテジー取引: 利用不可」とされており、
+IBKRのBAGプレビューが受理されたこと自体はOSEでの約定が原子的であることを何ら
+証明しません。`PAPER_COMBO_TEST_REQUIRED` はあくまで次にペーパー口座/TWSでの
+手動コンボ約定メカニズム検証に進む価値がある、という研究上の結論に過ぎません。
+詳細は [`PHASE6_NOTES.md`](PHASE6_NOTES.md) を参照してください。
