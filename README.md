@@ -71,6 +71,7 @@ kabuopu-arb-scan/
 ├── PHASE16_NOTES.md               # Phase 16(気配持続性×ペーパー制御パスの重ね合わせ)の詳細ドキュメント
 ├── PHASE17_NOTES.md               # Phase 17(同期パッケージレベル気配持続性)の詳細ドキュメント
 ├── PHASE18_NOTES.md               # Phase 18(イベント駆動の同期パッケージ持続区間)の詳細ドキュメント
+├── PHASE19_NOTES.md               # Phase 19(イベント駆動パッケージの破綻モード分析)の詳細ドキュメント
 ├── requirements.txt
 ├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13/14/15/18専用の追加依存(ibapi)
 ├── .gitignore
@@ -101,7 +102,8 @@ kabuopu-arb-scan/
 │   ├── analyze_end_to_end_touch_retention.py # Phase 12気配持続性とPhase 15ペーパータイミングを重ね合わせ(IBKR接続なし)
 │   ├── analyze_synchronized_package_survival.py # Phase 4同期サンプルから全レッグ同時の気配持続性を直接測定(IBKR接続なし)
 │   ├── ibkr_record_package_events.py # 全レッグ同時のIBKRストリーミングcallbackを読み取り専用記録(発注系API一切なし)
-│   └── analyze_event_driven_package_intervals.py # イベント駆動の同期パッケージ持続区間をオフライン再構成(IBKR接続なし)
+│   ├── analyze_event_driven_package_intervals.py # イベント駆動の同期パッケージ持続区間をオフライン再構成(IBKR接続なし)
+│   └── analyze_package_failure_modes.py # Phase 18のcallbackログから破綻モードを分類(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -904,3 +906,71 @@ callbackストリーム上で、表示実行可能パッケージ全体がlive�
 わたって観測された、ということだけです。取引所の板がcallback間で連続して
 変化しなかったこと、注文が約定したことは一切証明しません。詳細は
 [`PHASE18_NOTES.md`](PHASE18_NOTES.md) を参照してください。
+
+### 20. (Phase 19) イベント駆動パッケージの破綻モードを分析する
+
+Phase 18はパッケージの全レッグが同時にlive・新鮮・十分なサイズ・執行可能・
+手数料後正エッジであるローカル観測区間を再構成します。Phase 19は別の問いを
+立てます:「その局所的に有効な区間が終わるとき、最初に何が壊れたのか?」
+
+完全オフラインで、Phase 18のcallbackログをPhase 18と同じ有効性ルールで
+リプレイし、各**valid→invalid**境界を以下のいずれかの観測モードに分類します
+(`analyze_package_failure_modes.py`は`analyze_event_driven_package_intervals.py`
+をインポートして再利用するのみで、`ibapi`のimportや発注・気配データAPI呼び
+出しがないことを`grep`で確認済み)。
+
+- `PRICE_EDGE_COLLAPSE`
+- `DISPLAYED_SIZE_LOSS`
+- `MARKET_DATA_TYPE_LOSS`
+- `STALE_PRICE`
+- `STALE_SIZE`
+- `QUOTE_INVALID_OR_MISSING`
+- `OTHER`
+
+`ANALYSIS_END`は**打ち切り(right censoring)**として扱われ、破綻とはカウント
+しません。これをしないと短い記録ウィンドウが見かけ上の破綻数を機械的に
+水増ししてしまうためです。
+
+`phase19_is_exchange_hazard=False`、`phase19_is_fill_probability=False`、
+`phase19_cancellation_inference_allowed=False`、
+`phase19_live_money_allowed=False`を常に出力します。タイムスタンプはローカル
+callback受信時刻であり、裏付けのないサイズ消失をキャンセルと呼ぶことはせず、
+価格起因のエッジ喪失を「実際の注文が先に約定できたか」の証拠とはしません。
+
+**破綻レッグの帰属**: `LEG_2_INSUFFICIENT_SIZE`のような失敗はPhase 18の
+有効性理由から直接そのレッグに帰属します。`NONPOSITIVE_EDGE`の場合は同じ
+境界の執行可能側価格callback(BUYは`ASK_PRICE`、SELLは`BID_PRICE`)を見て、
+変化したレッグが1つだけなら`SINGLE_BREAKER_LEG`、複数なら因果順序を捏造せず
+`MULTIPLE_POSSIBLE_BREAKER_LEGS`のままとします。陳腐化境界は常に`STALENESS`
+と明示されます。
+
+```bash
+python scripts/analyze_package_failure_modes.py \
+  data/phase18_candidates.csv \
+  --event-inputs 'data/phase18_events_*.csv' \
+  --max-state-age-sec 3 \
+  --min-sessions 3 \
+  --min-failures 5 \
+  --artifact-dominance-threshold 0.50 \
+  --sessions-output data/phase19_sessions.csv \
+  --failures-output data/phase19_failures.csv \
+  --output data/phase19_candidates.csv \
+  --summary-json data/phase19_summary.json
+```
+
+既定のゲートは、Phase 18判定
+`EVENT_DRIVEN_PACKAGE_INTERVALS_ROBUST_ENOUGH_FOR_NEXT_RESEARCH`、少なくとも
+3件の分析済みイベントセッション、少なくとも5件の観測されたvalid→invalid破綻を
+要求します。そのうえで、陳腐化(stale price/size)が破綻の50%以上を占めれば
+`OBSERVATION_STALENESS_DOMINATES`、マーケットデータタイプ喪失が50%以上なら
+`MARKET_DATA_INSTABILITY_DOMINATES`、それ以外は
+`FAILURE_MODES_CHARACTERIZED_FOR_NEXT_RESEARCH`と判定します。この
+陳腐化/マーケットデータ判定は「観測手法上の診断停止」であり、対象市場自体が
+不安定だという主張ではありません。
+
+有用なフィールドには`dominant_failure_mode`、`dominant_failure_mode_share`、
+`local_failure_incidence_per_valid_minute`(**局所的に有効だったパッケージ時間**
+を分母とする局所観測破綻発生率であり、取引所ハザード率ではありません)、
+`staleness_failure_share`、`market_data_type_failure_share`、
+`breaker_leg_counts_json`、`attribution_quality`が含まれます。詳細は
+[`PHASE19_NOTES.md`](PHASE19_NOTES.md) を参照してください。
