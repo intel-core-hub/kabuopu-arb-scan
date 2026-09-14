@@ -64,8 +64,9 @@ kabuopu-arb-scan/
 ├── PHASE9_BROKER_QUESTIONS.md     # IBKRサポートへ確認すべき質問リスト
 ├── PHASE10_NOTES.md               # Phase 10(非原子執行の気配リプレイ)の詳細ドキュメント
 ├── PHASE11_NOTES.md               # Phase 11(OSEリアルタイム/L2 API能力ゲート)の詳細ドキュメント
+├── PHASE12_NOTES.md               # Phase 12(表示気配タッチの持続性実測)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3/4/6/7/11専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12専用の追加依存(ibapi)
 ├── .gitignore
 ├── config/
 │   └── phase9_venue_broker_evidence.example.json # Phase 9証拠JSONのテンプレート
@@ -82,7 +83,9 @@ kabuopu-arb-scan/
 │   ├── analyze_paper_combo_traces.py # Phase 7トレースのオフライン集計(IBKR接続なし)
 │   ├── evaluate_broker_confirmation.py # ベニュー/ブローカー証拠に基づく最終ゲート(IBKR接続なし)
 │   ├── simulate_nonatomic_execution.py # レッグ別逐次約定の気配リプレイ(IBKR接続なし)
-│   └── ibkr_probe_marketdata_capability.py # OSEリアルタイムL1/L2データ能力の読み取り専用プローブ(発注系API一切なし)
+│   ├── ibkr_probe_marketdata_capability.py # OSEリアルタイムL1/L2データ能力の読み取り専用プローブ(発注系API一切なし)
+│   ├── ibkr_record_depth_survival.py # OSE L2板情報の読み取り専用記録(発注系API一切なし)
+│   └── analyze_touch_survival.py  # 表示気配タッチの持続性をオフライン分析(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -492,3 +495,54 @@ python scripts/ibkr_probe_marketdata_capability.py \
 検討してください。出力は常に `phase11_live_money_allowed=False`、
 `phase11_atomicity_established=False`です。詳細は
 [`PHASE11_NOTES.md`](PHASE11_NOTES.md) を参照してください。
+
+### 13. (Phase 12) 表示気配タッチの持続性を実測する
+
+Phase 11はAPIセッションがL1/L2を受信できるかを確認するだけで、キュー位置・
+隠れ流動性・約定確率は一切わかりません。Phase 12はこれらを「約定確率」とは
+呼ばず、より狭い観測量である**表示気配タッチの持続性**だけを測定します。
+BUYレッグではライブの最良売気配が必要数量以上で表示され続けた時間を、SELL
+レッグでは対称的に最良買気配について測定します。Phase 10のレッグ間遅延の
+ストレス・キャリブレーション統計として有用ですが、約定確率の推定ではあり
+ません。
+
+`ibkr_record_depth_survival.py`(読み取り専用の記録)はPhase 11の
+`READY_FOR_L2_FILL_MODEL`判定を要求し、候補の各レッグに**順番に**(同時ではなく)
+板情報を購読して直接の板イベントとトップオブブック状態を記録します。IBKRは
+レベルIIの同時購読数を通常の気配データより厳しく制限しているため、複数レッグ
+候補で同時購読数を仮定しないよう逐次記録としています。発注・変更・取消は
+一切行わず、`cancelMktDepth`/`cancelMktData`で購読を止めるのみです。
+
+`analyze_touch_survival.py`(完全オフライン)は記録されたイベントを規則的な
+グリッドにフォワードフィルし、実行可能なトリガーを特定して、設定可能な
+複数の時間軸(既定100/250/500/1000/2000ms)での持続割合を報告します。
+
+```bash
+python scripts/ibkr_record_depth_survival.py \
+  data/persistence_7203_new.csv \
+  --phase11-summary data/phase11_marketdata_probe_summary.json \
+  --candidate-id '<candidate-id>' \
+  --duration-per-leg 60 \
+  --depth-rows 5 \
+  --output data/phase12_depth_events.csv \
+  --summary-json data/phase12_recording_summary.json
+
+python scripts/analyze_touch_survival.py \
+  data/phase12_depth_events.csv \
+  --horizons-ms 100,250,500,1000,2000 \
+  --grid-step-ms 50 \
+  --target-horizon-ms 500 \
+  --min-survival 0.80 \
+  --min-complete-triggers 20 \
+  --output data/phase12_touch_survival.csv \
+  --summary-json data/phase12_touch_survival_summary.json
+```
+
+最も強い判定`TOUCH_SURVIVAL_ROBUST_ENOUGH_FOR_QUEUE_RESEARCH`が意味するのは
+「表示気配が経験的に安定しておりキュー/約定確率の研究に進む価値がある」だけ
+で、実弾取引を許可するものでは**ありません**。500msの持続率が低ければ、
+Phase 10で仮定した500msの逐次レッグ遅延は既に楽観的だったことになり、非原子
+執行パスは弱い証拠として扱うべきです。1〜2秒でも持続率が高い場合でも、それは
+あくまで表示気配の持続性についての証拠であり、新規注文が約定することの証明
+ではありません。詳細は [`PHASE12_NOTES.md`](PHASE12_NOTES.md) を参照して
+ください。
