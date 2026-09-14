@@ -54,15 +54,17 @@ kabuopu-arb-scan/
 ├── README.md
 ├── PHASE2_NOTES.md                # Phase 2(気配値ベース検査)の詳細ドキュメント
 ├── PHASE3_NOTES.md                # Phase 3(IBKRライブ再検証)の詳細ドキュメント
+├── PHASE4_NOTES.md                # Phase 4(同時ストリーミング持続性検査)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4専用の追加依存(ibapi)
 ├── .gitignore
 ├── scripts/
 │   ├── fetch_jpx_option_data.py   # JPXオプション理論価格データ取得(URL要確認)
 │   ├── option_arbitrage_scan.py   # 理論価格ベースの静的無裁定性スキャナ
 │   ├── fetch_kabuopu_quotes.py    # かぶオプ気配値ボード(15分遅延)取得
 │   ├── quote_arbitrage_scan.py    # 気配値(bid/ask)ベースの静的無裁定性スキャナ
-│   └── ibkr_validate_findings.py  # IBKRライブ気配での再検証(発注は一切行わない)
+│   ├── ibkr_validate_findings.py  # IBKRライブ気配での単発再検証(発注は一切行わない)
+│   └── ibkr_monitor_findings.py   # IBKR同時ストリーミングでの持続性検査(発注は一切行わない)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -165,3 +167,35 @@ python scripts/ibkr_validate_findings.py \
 `CONFIRMED_CANDIDATE` はあくまで研究上の候補であり、発注前に数量・乗数・
 手数料・空売り可否・再取得での再現性・複数レッグ約定リスクを必ず確認して
 ください。詳細は [`PHASE3_NOTES.md`](PHASE3_NOTES.md) を参照してください。
+
+### 5. (Phase 4) 複数レッグを同時ストリーミングして持続性を検査する
+
+Phase 3の単発スナップショットでは、たまたま瞬間的・内部的に不整合な組み合わせを
+捉えてしまう可能性があります。`ibkr_monitor_findings.py` は候補の全レッグを
+同時に購読し続け(`reqMktData(..., snapshot=False)`)、一定間隔でサンプリングして
+エッジが持続するかを検査します。こちらも**発注・変更・取消は一切行わない
+読み取り専用**で、購読終了時は `cancelMktData` のみを呼びます。
+
+```bash
+python scripts/ibkr_monitor_findings.py data/findings_7203.csv \
+  --market-data-type live \
+  --exchange OSE.JPN \
+  --limit 5 \
+  --duration 10 \
+  --sample-interval 0.5 \
+  --warmup 2 \
+  --max-quote-age 3 \
+  --output data/persistence_7203.csv
+```
+
+- `PERSISTENT_LIVE_CANDIDATE`: live判定かつ正のエッジの観測が監視時間の80%以上
+  継続した場合(保守的な下限推定による)
+- `INTERMITTENT_LIVE_CANDIDATE`: live判定かつ正のエッジの観測はあったが、
+  持続時間が短かった場合
+- `NO_PERSISTENT_LIVE_EDGE`: live判定かつ正のエッジの観測が一度もなかった場合
+- `ERROR`: 銘柄特定失敗・API・入力エラー等
+
+frozen/delayedな気配がliveとして扱われることはなく、古くなった実行可能価格・
+サイズは持ち越さずに除外されます。表示サイズが不足・欠落している観測もlive陽性
+としてカウントしません。これも研究シグナルであり執行保証ではないため、詳細は
+[`PHASE4_NOTES.md`](PHASE4_NOTES.md) を参照してください。
