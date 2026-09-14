@@ -68,6 +68,7 @@ kabuopu-arb-scan/
 ├── PHASE13_NOTES.md               # Phase 13(気配-約定整合性の検証)の詳細ドキュメント
 ├── PHASE14_NOTES.md               # Phase 14(保守的レイテンシ予算オーバーレイ)の詳細ドキュメント
 ├── PHASE15_NOTES.md               # Phase 15(ペーパー注文ライフサイクルのタイミング)の詳細ドキュメント
+├── PHASE16_NOTES.md               # Phase 16(気配持続性×ペーパー制御パスの重ね合わせ)の詳細ドキュメント
 ├── requirements.txt
 ├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13/14/15専用の追加依存(ibapi)
 ├── .gitignore
@@ -94,7 +95,8 @@ kabuopu-arb-scan/
 │   ├── ibkr_measure_api_rtt.py    # reqCurrentTime往復時間の読み取り専用プローブ(発注系API一切なし)
 │   ├── analyze_latency_budget.py  # Phase 12/13とRTT往復時間を統合する保守的予算分析(IBKR接続なし)
 │   ├── ibkr_measure_paper_order_lifecycle.py # DU口座限定のペーパー注文ライフサイクル計測(Phase 7の安全機構を再利用)
-│   └── analyze_paper_order_lifecycle.py # ペーパー注文callbackタイミングをPhase 14予算と比較(IBKR接続なし)
+│   ├── analyze_paper_order_lifecycle.py # ペーパー注文callbackタイミングをPhase 14予算と比較(IBKR接続なし)
+│   └── analyze_end_to_end_touch_retention.py # Phase 12気配持続性とPhase 15ペーパータイミングを重ね合わせ(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -734,4 +736,48 @@ python scripts/analyze_paper_order_lifecycle.py \
 最も強い判定`PAPER_ACK_P95_WITHIN_PHASE14_BUDGET`が意味するのは、繰り返し
 観測した**ペーパーcallbackの応答**がPhase 14の保守的な研究用予算に収まって
 いるということだけです。詳細は [`PHASE15_NOTES.md`](PHASE15_NOTES.md) を
+参照してください。
+
+### 17. (Phase 16) 気配持続性とペーパー制御パスを重ね合わせる
+
+Phase 12は直接L2観測から**表示気配タッチの持続性**を、Phase 15はガード済み
+ペーパーBAG送信1回後の**ペーパー/TWS最初のcallbackタイミング**を測定しました。
+どちらも取引所到達レイテンシでも約定確率でもありません。Phase 16はこの2つの
+経験的観測を、どちらの主張もアップグレードすることなく組み合わせます。
+`analyze_end_to_end_touch_retention.py`(**完全オフライン**、`ibapi`のimportや
+IBKR/ネットワーク呼び出しは一切なし)は、Phase 15の各`phase15_first_callback_ms`
+サンプルに明示的な安全マージンを加え、その遅延を**次に長い**Phase 12の持続時間
+軸にマッピングします。時間軸間の**補間は一切行わず**、観測済みの最長時間軸を
+超えて**外挿もしません**。
+
+複数レッグ候補では、サンプルスコアは**レッグ間の最小周辺気配持続性**を
+使います。レッグの持続性を掛け合わせることは意図的に**行いません**——それは
+正当化できない独立性の仮定を課すことになり、結合約定確率と誤解される
+おそれがあるためです。
+
+```bash
+python scripts/analyze_end_to_end_touch_retention.py \
+  data/phase12_touch_survival.csv \
+  data/phase15_paper_lifecycle_summary.csv \
+  --phase15-traces 'data/phase15_lifecycle_*.csv' \
+  --extra-latency-ms 100 \
+  --min-sessions 3 \
+  --min-retention 0.80 \
+  --bootstrap-reps 2000 \
+  --legs-output data/phase16_touch_latency_legs.csv \
+  --samples-output data/phase16_touch_latency_samples.csv \
+  --output data/phase16_candidates.csv \
+  --summary-json data/phase16_summary.json
+```
+
+最も強い判定`TOUCH_RETAINS_THROUGH_PAPER_CONTROL_PATH_FOR_NEXT_RESEARCH`が
+意味するのは、観測されたペーパーcallbackタイミング分布+安全マージンの下で、
+**最弱レッグの周辺気配持続性スコアのブートストラップ下限**が設定した閾値を
+超えたということだけです。出力は常に `phase16_is_fill_probability=False`、
+`phase16_is_order_arrival_probability=False`、
+`phase16_is_joint_leg_probability=False`、
+`phase16_independence_assumption_used=False`、
+`phase16_live_money_allowed=False`で、取引所到達レイテンシ・実運用ルーティング
+レイテンシ・キュー優先度・隠れ流動性・結合レッグ持続性・約定確率・期待損益の
+いずれも証明しません。詳細は [`PHASE16_NOTES.md`](PHASE16_NOTES.md) を
 参照してください。
