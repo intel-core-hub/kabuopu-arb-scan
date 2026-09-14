@@ -67,8 +67,9 @@ kabuopu-arb-scan/
 ├── PHASE12_NOTES.md               # Phase 12(表示気配タッチの持続性実測)の詳細ドキュメント
 ├── PHASE13_NOTES.md               # Phase 13(気配-約定整合性の検証)の詳細ドキュメント
 ├── PHASE14_NOTES.md               # Phase 14(保守的レイテンシ予算オーバーレイ)の詳細ドキュメント
+├── PHASE15_NOTES.md               # Phase 15(ペーパー注文ライフサイクルのタイミング)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13/14専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13/14/15専用の追加依存(ibapi)
 ├── .gitignore
 ├── config/
 │   └── phase9_venue_broker_evidence.example.json # Phase 9証拠JSONのテンプレート
@@ -91,7 +92,9 @@ kabuopu-arb-scan/
 │   ├── ibkr_record_touch_depletion.py # 気配枯渇とLast/Last Sizeの読み取り専用記録(発注系API一切なし)
 │   ├── analyze_touch_depletion.py # 気配枯渇と約定printの整合性をオフライン分析(IBKR接続なし)
 │   ├── ibkr_measure_api_rtt.py    # reqCurrentTime往復時間の読み取り専用プローブ(発注系API一切なし)
-│   └── analyze_latency_budget.py  # Phase 12/13とRTT往復時間を統合する保守的予算分析(IBKR接続なし)
+│   ├── analyze_latency_budget.py  # Phase 12/13とRTT往復時間を統合する保守的予算分析(IBKR接続なし)
+│   ├── ibkr_measure_paper_order_lifecycle.py # DU口座限定のペーパー注文ライフサイクル計測(Phase 7の安全機構を再利用)
+│   └── analyze_paper_order_lifecycle.py # ペーパー注文callbackタイミングをPhase 14予算と比較(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -668,3 +671,67 @@ python scripts/analyze_latency_budget.py \
 `phase14_is_exchange_latency=False`、`phase14_is_fill_probability=False`、
 `phase14_one_way_inference_used=False`、`phase14_live_money_allowed=False`
 です。詳細は [`PHASE14_NOTES.md`](PHASE14_NOTES.md) を参照してください。
+
+### 16. (Phase 15) ペーパー注文のライフサイクルタイミングを計測する
+
+Phase 14は`reqCurrentTime()`の往復時間をコントロールプレーンの保守的な予算
+として使いましたが、実際の**注文**がTWS/IBKR側でどう扱われるかは測って
+いません。Phase 15は、Phase 6で承認済みの研究用BAG注文を**IBKRのペーパー
+口座のみ**に1件送信し、`openOrder`・`orderStatus`・`execDetails`・
+注文固有のエラーといったcallbackまでのローカル経過時間を計測します。ペーパー/
+TWSの注文制御パスがPhase 14の予算より明らかに遅くないかを確認するのに
+有用ですが、本番のルーティングレイテンシ・取引所到達時間・OSEの原子性・
+キュー優先度・約定確率を確立するものでは**ありません**。
+
+**安全機構(Phase 7の仕組みをそのまま再利用):**
+- `placeOrder`/`cancelOrder`を直接は一切呼びません。実際の発注・キャンセルは
+  Phase 7(`ibkr_paper_combo_test.py`)から**import**した`submit_paper_order`/
+  `cancel_own_order`のみを経由し、Phase 7で確認済みの二重の`whatIf=False`/
+  `transmit=True`/DU口座チェックがそのまま適用されます(`grep`で本ファイル中に
+  `app.placeOrder`/`app.cancelOrder`の直接呼び出しがないことを確認済み)
+- Phase 14の候補判定が`LATENCY_BUDGET_SURVIVES_FOR_NEXT_RESEARCH`であることを
+  要求
+- デフォルトはプランのみ。`--run-paper`には`--account`(DU限定)と、専用の
+  確認フレーズ`--paper-ack
+  I_UNDERSTAND_THIS_SUBMITS_ONE_SIMULATED_PAPER_ORDER_FOR_TIMING_RESEARCH`
+  が必須
+- 1回の実行につき候補・パッケージとも最大1件のみ
+- 指値の置き換え(price replace)は一切行いません
+- 観測時間終了後も注文が残っていれば、その注文IDのみをキャンセル
+  (`reqGlobalCancel`は一切使用せず、ソースにも存在しないことを確認済み)
+- 出力には常に `phase15_live_money_allowed=False`、
+  `phase15_is_exchange_arrival_latency=False`、
+  `phase15_is_live_latency=False` が記録されます
+
+```bash
+# プランのみ
+python scripts/ibkr_measure_paper_order_lifecycle.py \
+  data/execution_study_whatif.csv \
+  data/phase14_latency_candidates.csv \
+  --candidate-id '<candidate-id>' \
+  --output data/phase15_plan.csv
+
+# ペーパー1回分の計測
+python scripts/ibkr_measure_paper_order_lifecycle.py \
+  data/execution_study_whatif.csv \
+  data/phase14_latency_candidates.csv \
+  --candidate-id '<candidate-id>' \
+  --run-paper \
+  --account DU1234567 \
+  --paper-ack I_UNDERSTAND_THIS_SUBMITS_ONE_SIMULATED_PAPER_ORDER_FOR_TIMING_RESEARCH \
+  --port 4002 \
+  --output data/phase15_lifecycle_001.csv
+
+# 3回以上のペーパー計測を集計(完全オフライン)
+python scripts/analyze_paper_order_lifecycle.py \
+  'data/phase15_lifecycle_*.csv' \
+  --min-sessions 3 \
+  --timing-quantile 0.95 \
+  --output data/phase15_paper_lifecycle_summary.csv \
+  --summary-json data/phase15_summary.json
+```
+
+最も強い判定`PAPER_ACK_P95_WITHIN_PHASE14_BUDGET`が意味するのは、繰り返し
+観測した**ペーパーcallbackの応答**がPhase 14の保守的な研究用予算に収まって
+いるということだけです。詳細は [`PHASE15_NOTES.md`](PHASE15_NOTES.md) を
+参照してください。
