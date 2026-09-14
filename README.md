@@ -57,8 +57,9 @@ kabuopu-arb-scan/
 ├── PHASE4_NOTES.md                # Phase 4(同時ストリーミング持続性検査)の詳細ドキュメント
 ├── PHASE5_NOTES.md                # Phase 5(複数セッション再現性ゲート)の詳細ドキュメント
 ├── PHASE6_NOTES.md                # Phase 6(IBKR What-If執行可能性調査)の詳細ドキュメント
+├── PHASE7_NOTES.md                # Phase 7(ペーパー口座コンボ約定メカニズム実験)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3/4/6専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4/6/7専用の追加依存(ibapi)
 ├── .gitignore
 ├── scripts/
 │   ├── fetch_jpx_option_data.py   # JPXオプション理論価格データ取得(URL要確認)
@@ -68,7 +69,8 @@ kabuopu-arb-scan/
 │   ├── ibkr_validate_findings.py  # IBKRライブ気配での単発再検証(発注は一切行わない)
 │   ├── ibkr_monitor_findings.py   # IBKR同時ストリーミングでの持続性検査(発注は一切行わない)
 │   ├── evaluate_persistence.py    # 複数セッションを集計する再現性ゲート(IBKR接続なし)
-│   └── ibkr_execution_study.py    # IBKR What-Ifプレビューのみ(実発注は一切行わない)
+│   ├── ibkr_execution_study.py    # IBKR What-Ifプレビューのみ(実発注は一切行わない)
+│   └── ibkr_paper_combo_test.py   # DU口座限定のペーパー約定実験(実弾口座には送信できない)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -281,3 +283,54 @@ IBKRのBAGプレビューが受理されたこと自体はOSEでの約定が原�
 証明しません。`PAPER_COMBO_TEST_REQUIRED` はあくまで次にペーパー口座/TWSでの
 手動コンボ約定メカニズム検証に進む価値がある、という研究上の結論に過ぎません。
 詳細は [`PHASE6_NOTES.md`](PHASE6_NOTES.md) を参照してください。
+
+### 8. (Phase 7) ペーパー口座でコンボ約定メカニズムを実験する
+
+Phase 6はWhat-If(プレビュー)止まりでした。`ibkr_paper_combo_test.py` は
+Phase 7で初めて実際に注文を送信しうる段階ですが、**IBKRのペーパー口座のみ**を
+対象に約定メカニズム(受理されるか、`orderStatus`の遷移、`execDetails`が
+`BAG`単位か個別`OPT`単位か、部分約定の有無、同一注文IDでの指値変更、残数量の
+キャンセル)を観察するための実験です。実弾口座に発注するものでは**ありません**。
+
+**安全機構(実運用への流出を防ぐ多重ガード):**
+- デフォルトはオフラインの `PLAN_ONLY`。`--run-paper` を明示しない限りIBKRには接続しません
+- `--run-paper` には `--account` と、厳密一致が必要な確認フレーズ
+  `--paper-ack I_UNDERSTAND_THIS_SUBMITS_A_SIMULATED_PAPER_ORDER` が必須です
+- 指定した口座がIBKR自身の`managedAccounts`コールバックに実際に含まれているか、
+  かつ口座IDが`DU`で始まるか(IBKRのペーパー口座命名規則)を**発注直前にも
+  再チェック**します
+- 親注文は `BUY` / `LMT` / 数量ちょうど1パッケージ / `transmit=True` に固定され、
+  `orderRef`は`kabuopu-phase7-paper-`で始まる必要があります
+- 1回の実行につき候補は最大1件のみ処理します
+- キャンセルは自分が発注した注文IDに対する`cancelOrder`のみ(`reqGlobalCancel`は
+  一切使用しません)
+- 出力には常に `phase7_live_money_allowed=False` と
+  `phase7_atomicity_established=False` が記録されます
+
+```bash
+# プランのみ(IBKR接続なし)
+python scripts/ibkr_paper_combo_test.py \
+  data/execution_study_whatif.csv \
+  --output data/paper_combo_plan.csv
+
+# ペーパー口座での実験(paper用のTWS/IB Gatewayに接続していること)
+python scripts/ibkr_paper_combo_test.py \
+  data/execution_study_whatif.csv \
+  --run-paper \
+  --account DU1234567 \
+  --paper-ack I_UNDERSTAND_THIS_SUBMITS_A_SIMULATED_PAPER_ORDER \
+  --port 4002 \
+  --exchange OSE.JPN \
+  --currency JPY \
+  --observe-seconds 5 \
+  --output data/paper_combo_trace.csv
+```
+
+`phase7_trace_class` は `PAPER_FULL_FILL_OBSERVED` / `PAPER_PARTIAL_OR_LEG_EXECUTION_OBSERVED` /
+`PAPER_ACCEPTED_THEN_CANCELLED` / `PAPER_ORDER_REJECTED_OR_INACTIVE` /
+`PAPER_ORDER_REJECTED_OR_NO_ACK` / `PAPER_ACKNOWLEDGED_NO_TERMINAL` /
+`PAPER_NO_ACKNOWLEDGEMENT` のいずれかで、送信後の唯一の判定は
+`MANUAL_REVIEW_PAPER_TRACE` です。ペーパーでの完全約定観測(`PAPER_FULL_FILL_OBSERVED`)
+であっても、それ自体は自動的な「実弾GOシグナル」では**ありません**。IBKRのペーパー
+シミュレーションはコンボ取引の挙動が制限されていることが公式に案内されています。
+詳細は [`PHASE7_NOTES.md`](PHASE7_NOTES.md) を参照してください。
