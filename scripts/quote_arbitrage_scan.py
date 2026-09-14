@@ -8,6 +8,7 @@ and available size before any order is sent.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -65,9 +66,20 @@ def _pv_width(width: float, rate: float, as_of: date, expiry: str) -> float:
     return width * math.exp(-rate * t)
 
 
+def _leg(action: str, option_type: str, strike: float, qty: int = 1) -> dict[str, object]:
+    return {
+        "action": action,
+        "option_type": option_type,
+        "strike": float(strike),
+        "qty": int(qty),
+    }
+
+
 def _emit(findings: list[dict], *, check: str, underlying: str, expiry: str, strikes: str,
-          legs: str, gross_edge_per_share: float, lot_size: float, fee_legs: int,
-          fee_per_contract_leg: float, min_quote_size: Optional[float], detail: str) -> None:
+          legs: str, legs_struct: list[dict[str, object]], gross_edge_per_share: float,
+          floor_pv_per_share: float, lot_size: float, fee_legs: int,
+          fee_per_contract_leg: float, min_quote_size: Optional[float], detail: str,
+          rate: float, as_of: date) -> None:
     gross_contract = gross_edge_per_share * lot_size
     fees = fee_legs * fee_per_contract_leg
     net = gross_contract - fees
@@ -79,6 +91,13 @@ def _emit(findings: list[dict], *, check: str, underlying: str, expiry: str, str
         "expiry": expiry,
         "strikes": strikes,
         "legs": legs,
+        "legs_json": json.dumps(legs_struct, ensure_ascii=False, separators=(",", ":")),
+        "floor_pv_per_share": floor_pv_per_share,
+        "lot_size": lot_size,
+        "fee_legs": fee_legs,
+        "fee_per_contract_leg": fee_per_contract_leg,
+        "rate": rate,
+        "as_of": as_of.isoformat(),
         "gross_edge_per_share": gross_edge_per_share,
         "gross_edge_per_contract": gross_contract,
         "fees_per_contract": fees,
@@ -122,10 +141,14 @@ def scan(df: pd.DataFrame, *, rate: float = 0.0, fee_per_contract_leg: float = 0
                 _emit(
                     findings, check="crossed_spread", underlying=underlying_s, expiry=expiry_s,
                     strikes=f"{q.strike:g}", legs=f"BUY ask {q.ask:g}; SELL bid {q.bid:g}",
-                    gross_edge_per_share=q.bid - q.ask, lot_size=lot, fee_legs=2,
-                    fee_per_contract_leg=fee_per_contract_leg,
+                    legs_struct=[
+                        _leg("BUY", str(row["option_type"]), q.strike),
+                        _leg("SELL", str(row["option_type"]), q.strike),
+                    ],
+                    gross_edge_per_share=q.bid - q.ask, floor_pv_per_share=0.0,
+                    lot_size=lot, fee_legs=2, fee_per_contract_leg=fee_per_contract_leg,
                     min_quote_size=_size_min(q.ask_size, q.bid_size),
-                    detail="same option bid exceeds ask in delayed snapshot",
+                    detail="same option bid exceeds ask in delayed snapshot", rate=rate, as_of=snap_date,
                 )
 
         by_type: dict[str, list[Quote]] = {"C": [], "P": []}
@@ -147,35 +170,39 @@ def scan(df: pd.DataFrame, *, rate: float = 0.0, fee_per_contract_leg: float = 0
                     # C(K1) >= C(K2): buy low-strike call at ask, sell high-strike call at bid.
                     edge_lower = q2.bid - q1.ask
                     lower_legs = f"BUY C {q1.strike:g}@{q1.ask:g}; SELL C {q2.strike:g}@{q2.bid:g}"
+                    lower_struct = [_leg("BUY", "C", q1.strike), _leg("SELL", "C", q2.strike)]
                     lower_size = _size_min(q1.ask_size, q2.bid_size)
                     # C(K1)-C(K2) <= PV(K2-K1): receive reverse side of long spread.
                     credit = q1.bid - q2.ask
                     edge_upper = credit - pv
                     upper_legs = f"SELL C {q1.strike:g}@{q1.bid:g}; BUY C {q2.strike:g}@{q2.ask:g}"
+                    upper_struct = [_leg("SELL", "C", q1.strike), _leg("BUY", "C", q2.strike)]
                     upper_size = _size_min(q1.bid_size, q2.ask_size)
                 else:
                     # P(K2) >= P(K1): buy high-strike put, sell low-strike put.
                     edge_lower = q1.bid - q2.ask
                     lower_legs = f"SELL P {q1.strike:g}@{q1.bid:g}; BUY P {q2.strike:g}@{q2.ask:g}"
+                    lower_struct = [_leg("SELL", "P", q1.strike), _leg("BUY", "P", q2.strike)]
                     lower_size = _size_min(q1.bid_size, q2.ask_size)
                     # P(K2)-P(K1) <= PV(width).
                     credit = q2.bid - q1.ask
                     edge_upper = credit - pv
                     upper_legs = f"BUY P {q1.strike:g}@{q1.ask:g}; SELL P {q2.strike:g}@{q2.bid:g}"
+                    upper_struct = [_leg("BUY", "P", q1.strike), _leg("SELL", "P", q2.strike)]
                     upper_size = _size_min(q1.ask_size, q2.bid_size)
 
                 if edge_lower > 0:
                     _emit(findings, check="vertical_monotonicity", underlying=underlying_s, expiry=expiry_s,
-                          strikes=f"{q1.strike:g},{q2.strike:g}", legs=lower_legs,
-                          gross_edge_per_share=edge_lower, lot_size=lot, fee_legs=2,
+                          strikes=f"{q1.strike:g},{q2.strike:g}", legs=lower_legs, legs_struct=lower_struct,
+                          gross_edge_per_share=edge_lower, floor_pv_per_share=0.0, lot_size=lot, fee_legs=2,
                           fee_per_contract_leg=fee_per_contract_leg, min_quote_size=lower_size,
-                          detail=f"{typ} vertical has negative debit")
+                          detail=f"{typ} vertical has negative debit", rate=rate, as_of=snap_date)
                 if edge_upper > 0:
                     _emit(findings, check="vertical_upper_bound", underlying=underlying_s, expiry=expiry_s,
-                          strikes=f"{q1.strike:g},{q2.strike:g}", legs=upper_legs,
-                          gross_edge_per_share=edge_upper, lot_size=lot, fee_legs=2,
+                          strikes=f"{q1.strike:g},{q2.strike:g}", legs=upper_legs, legs_struct=upper_struct,
+                          gross_edge_per_share=edge_upper, floor_pv_per_share=-pv, lot_size=lot, fee_legs=2,
                           fee_per_contract_leg=fee_per_contract_leg, min_quote_size=upper_size,
-                          detail=f"vertical credit exceeds PV(strike width)={pv:.6g} per share")
+                          detail=f"vertical credit exceeds PV(strike width)={pv:.6g} per share", rate=rate, as_of=snap_date)
 
             # Equal-spaced long butterfly: buy wings at ask, sell 2x body at bid.
             for left, mid, right in zip(qs, qs[1:], qs[2:]):
@@ -188,10 +215,12 @@ def scan(df: pd.DataFrame, *, rate: float = 0.0, fee_per_contract_leg: float = 0
                           strikes=f"{left.strike:g},{mid.strike:g},{right.strike:g}",
                           legs=(f"BUY {typ} {left.strike:g}@{left.ask:g}; SELL 2 {typ} {mid.strike:g}@{mid.bid:g}; "
                                 f"BUY {typ} {right.strike:g}@{right.ask:g}"),
-                          gross_edge_per_share=edge, lot_size=lot, fee_legs=4,
+                          legs_struct=[_leg("BUY", typ, left.strike), _leg("SELL", typ, mid.strike, 2),
+                                       _leg("BUY", typ, right.strike)],
+                          gross_edge_per_share=edge, floor_pv_per_share=0.0, lot_size=lot, fee_legs=4,
                           fee_per_contract_leg=fee_per_contract_leg,
                           min_quote_size=_size_min(left.ask_size, body_size, right.ask_size),
-                          detail="equal-spaced long butterfly has negative debit")
+                          detail="equal-spaced long butterfly has negative debit", rate=rate, as_of=snap_date)
 
         # Boxes: pair strikes for which all four executable sides are present.
         calls = {q.strike: q for q in by_type["C"]}
@@ -211,10 +240,12 @@ def scan(df: pd.DataFrame, *, rate: float = 0.0, fee_per_contract_leg: float = 0
                           strikes=f"{k1:g},{k2:g}",
                           legs=(f"BUY C {k1:g}@{c1.ask:g}; SELL C {k2:g}@{c2.bid:g}; "
                                 f"BUY P {k2:g}@{p2.ask:g}; SELL P {k1:g}@{p1.bid:g}"),
-                          gross_edge_per_share=edge, lot_size=lot, fee_legs=4,
+                          legs_struct=[_leg("BUY", "C", k1), _leg("SELL", "C", k2),
+                                       _leg("BUY", "P", k2), _leg("SELL", "P", k1)],
+                          gross_edge_per_share=edge, floor_pv_per_share=pv, lot_size=lot, fee_legs=4,
                           fee_per_contract_leg=fee_per_contract_leg,
                           min_quote_size=_size_min(c1.ask_size, c2.bid_size, p2.ask_size, p1.bid_size),
-                          detail=f"long box cost={cost:.6g} < PV(width)={pv:.6g}")
+                          detail=f"long box cost={cost:.6g} < PV(width)={pv:.6g}", rate=rate, as_of=snap_date)
 
                 # Reverse box receives credit now and owes width at expiry.
                 credit = c1.bid - c2.ask + p2.bid - p1.ask
@@ -224,10 +255,12 @@ def scan(df: pd.DataFrame, *, rate: float = 0.0, fee_per_contract_leg: float = 0
                           strikes=f"{k1:g},{k2:g}",
                           legs=(f"SELL C {k1:g}@{c1.bid:g}; BUY C {k2:g}@{c2.ask:g}; "
                                 f"SELL P {k2:g}@{p2.bid:g}; BUY P {k1:g}@{p1.ask:g}"),
-                          gross_edge_per_share=edge_rev, lot_size=lot, fee_legs=4,
+                          legs_struct=[_leg("SELL", "C", k1), _leg("BUY", "C", k2),
+                                       _leg("SELL", "P", k2), _leg("BUY", "P", k1)],
+                          gross_edge_per_share=edge_rev, floor_pv_per_share=-pv, lot_size=lot, fee_legs=4,
                           fee_per_contract_leg=fee_per_contract_leg,
                           min_quote_size=_size_min(c1.bid_size, c2.ask_size, p2.bid_size, p1.ask_size),
-                          detail=f"reverse box credit={credit:.6g} > PV(width)={pv:.6g}")
+                          detail=f"reverse box credit={credit:.6g} > PV(width)={pv:.6g}", rate=rate, as_of=snap_date)
 
     out = pd.DataFrame(findings)
     if not out.empty:

@@ -53,13 +53,16 @@ neutral-carry-engine → topix-index-event-strategy)が4連続NO-GO/KILLとな�
 kabuopu-arb-scan/
 ├── README.md
 ├── PHASE2_NOTES.md                # Phase 2(気配値ベース検査)の詳細ドキュメント
+├── PHASE3_NOTES.md                # Phase 3(IBKRライブ再検証)の詳細ドキュメント
 ├── requirements.txt
+├── requirements-ibkr.txt          # Phase 3専用の追加依存(ibapi)
 ├── .gitignore
 ├── scripts/
 │   ├── fetch_jpx_option_data.py   # JPXオプション理論価格データ取得(URL要確認)
 │   ├── option_arbitrage_scan.py   # 理論価格ベースの静的無裁定性スキャナ
 │   ├── fetch_kabuopu_quotes.py    # かぶオプ気配値ボード(15分遅延)取得
-│   └── quote_arbitrage_scan.py    # 気配値(bid/ask)ベースの静的無裁定性スキャナ
+│   ├── quote_arbitrage_scan.py    # 気配値(bid/ask)ベースの静的無裁定性スキャナ
+│   └── ibkr_validate_findings.py  # IBKRライブ気配での再検証(発注は一切行わない)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -131,3 +134,28 @@ python scripts/quote_arbitrage_scan.py data/quotes_7203.csv \
 
 詳細な設計・解釈上の注意点(気配は15分遅延であり検出結果はそのまま裁定機会を
 意味しないこと等)は [`PHASE2_NOTES.md`](PHASE2_NOTES.md) を参照してください。
+
+### 4. (Phase 3) IBKRのライブ気配で再検証する
+
+かぶオプ気配値ボードは15分遅延のため、有力な候補だけをIBKRのライブ気配で
+再評価します。`ibkr_validate_findings.py` は**発注・変更・取消を一切行わない
+読み取り専用**のスクリプトです。TWS/IB Gatewayが起動し、APIクライアント接続
+が有効になっている必要があります。
+
+```bash
+pip install -r requirements-ibkr.txt
+
+python scripts/ibkr_validate_findings.py \
+  data/findings_7203.csv \
+  --market-data-type live \
+  --exchange OSE.JPN \
+  --limit 20 \
+  --output data/live_validation_7203.csv
+```
+
+`CONFIRMED_CANDIDATE`(手数料考慮後もライブ気配で正のエッジが残る)、
+`NO_LONGER_POSITIVE`(遅延ボードのエッジが消失)、`ERROR`(銘柄特定失敗・
+気配欠落等)のいずれかを出力します。`CONFIRMED_CANDIDATE` はあくまで研究上の
+候補であり、発注前に数量・乗数・手数料・空売り可否・再取得での再現性・
+複数レッグ約定リスクを必ず確認してください。詳細は
+[`PHASE3_NOTES.md`](PHASE3_NOTES.md) を参照してください。
