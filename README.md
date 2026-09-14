@@ -28,24 +28,25 @@ neutral-carry-engine → topix-index-event-strategy)が4連続NO-GO/KILLとな�
   → 機関投資家が本気で見ていない領域が実在する可能性がある
 - 弱点: 気配が薄い分、歪みを見つけても実際に約定できるとは限らない(執行リスク)
 
-## 現在のステータス(2026-09-13時点)
+## 現在のステータス(2026-09-14時点)
 
 - [x] 取扱証券会社の特定
-- [ ] JPX「オプション理論価格等情報」の現在(2026年)の提供形態・料金・URLの確認
-      ※ 2018年時点のブログ記事では無料CSV配信を確認できたが、現在は
-      JPXデータカタログ/クライアントポータル経由に変わっている可能性があり未確認
-- [ ] かぶオプ銘柄が実際にデータに含まれるかの確認
-- [ ] 1〜2銘柄でのIV(インプライドボラティリティ)サーフェス作成・無裁定条件
-      (バタフライ・カレンダー・put-callパリティ)の机上チェック
-- [ ] 実際に気配値・板がどこまで見えるか(IBKR等での確認)
+- [x] JPX「オプション理論価格等情報」が2026年も公開CSVで日々配信され、
+      オプション全銘柄を対象とすることを公式ページで確認
+- [x] 有価証券オプション(かぶオプ)の対象証券一覧と、2026年8月以降の
+      マーケットメイク対象50銘柄を公式ページで確認
+- [x] Phase 2〜4: 気配値ベース無裁定スキャン、IBKRデータ種別ガード、
+      同時ストリーミング持続性検査を実装
+- [x] Phase 5〜7: 再現性ゲート、What-If、DUペーパー口座限定のBAG実験を実装
+- [ ] 実市場でPhase 2〜5を複数セッション実測し、再現候補の有無を確認
+- [ ] Phase 6 What-If通過候補が出た場合のみ、Phase 7ペーパートレースを複数回収集
 
 ## 次の一歩
 
-1. `fetch_jpx_option_data.py` を使って、JPXの公開データから個別株オプションの
-   気配値・理論価格・IVが取得できるか確認する(URLが未確定のため要調査・要修正)
-2. 取得できたら、put-callパリティとバタフライ・カレンダー・スプレッドの
-   無裁定条件を1〜2銘柄でチェックするノートブック/スクリプトを書く
-3. 明らかな違反が見つかれば、執行可能性(気配の厚み)を確認するフェーズに進む
+1. 市場時間中にPhase 2〜5を実データで複数回まわし、再現候補を作る
+2. `PROMOTE_TO_EXECUTION_STUDY` 候補だけPhase 6 What-If、必要ならPhase 7 paperへ進める
+3. Phase 7トレースをPhase 8で集計し、BAG/OPT報告形態・callback順序・combo拒否を評価する
+4. Phase 8が良好でもlive原子性は未証明のままなので、broker/exchange仕様確認を次ゲートにする
 
 ## ディレクトリ構成
 
@@ -70,7 +71,8 @@ kabuopu-arb-scan/
 │   ├── ibkr_monitor_findings.py   # IBKR同時ストリーミングでの持続性検査(発注は一切行わない)
 │   ├── evaluate_persistence.py    # 複数セッションを集計する再現性ゲート(IBKR接続なし)
 │   ├── ibkr_execution_study.py    # IBKR What-Ifプレビューのみ(実発注は一切行わない)
-│   └── ibkr_paper_combo_test.py   # DU口座限定のペーパー約定実験(実弾口座には送信できない)
+│   ├── ibkr_paper_combo_test.py   # DU口座限定のペーパー約定実験(実弾口座には送信できない)
+│   └── analyze_paper_combo_traces.py # Phase 7トレースのオフライン集計(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -334,3 +336,33 @@ python scripts/ibkr_paper_combo_test.py \
 であっても、それ自体は自動的な「実弾GOシグナル」では**ありません**。IBKRのペーパー
 シミュレーションはコンボ取引の挙動が制限されていることが公式に案内されています。
 詳細は [`PHASE7_NOTES.md`](PHASE7_NOTES.md) を参照してください。
+
+### 9. (Phase 8) 複数のペーパートレースをオフライン集計する
+
+Phase 7の1回の結果だけでは、BAG/OPTの報告形態やcallback順序が再現するか判断できません。
+`analyze_paper_combo_traces.py` は複数のPhase 7 CSVを読み、同一候補について
+`orderStatus` と `execDetails` の整合性、BAG/OPT報告、combo固有エラー、重複callbackを
+集計します。**IBKRには接続せず、発注・変更・取消も一切行いません**。
+
+```bash
+python scripts/analyze_paper_combo_traces.py \
+  'data/paper_combo_trace_*.csv' \
+  --min-sessions 3 \
+  --min-bag-full-fills 2 \
+  --sequence-gap-ms 250 \
+  --sessions-output data/phase8_paper_sessions.csv \
+  --output data/phase8_paper_candidate_summary.csv \
+  --summary-json data/phase8_summary.json
+```
+
+主な候補判定は `BROKER_CONFIRMATION_REQUIRED` / `INVESTIGATE_LEG_CALLBACK_SEQUENCE` /
+`INVESTIGATE_LEG_REPORTING` / `STOP_COMBO_PATH_PENDING_FIX` / `KEEP_PAPER_OBSERVING` です。
+`OPT`のexecDetailsが見えただけでは実際のleggingとは断定せず、親fillより一定時間早い
+callbackのみをsequence riskとして分離します。API callbackの受信順序は取引所の約定順序
+そのものではないためです。
+
+Phase 8には意図的に`GO_LIVE`判定がありません。出力は常に
+`phase8_live_money_allowed=False`、`phase8_atomicity_established=False`です。
+繰り返しBAG-only fillが観測されても最大で`BROKER_CONFIRMATION_REQUIRED`に留め、
+live実験を設計する前にOSE/IBKRのrouting・guarantee semanticsを別途確認します。
+詳細は [`PHASE8_NOTES.md`](PHASE8_NOTES.md) を参照してください。
