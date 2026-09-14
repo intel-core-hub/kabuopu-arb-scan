@@ -63,8 +63,9 @@ kabuopu-arb-scan/
 ├── PHASE9_NOTES.md                # Phase 9(ベニュー/ブローカー確認ゲート)の詳細ドキュメント
 ├── PHASE9_BROKER_QUESTIONS.md     # IBKRサポートへ確認すべき質問リスト
 ├── PHASE10_NOTES.md               # Phase 10(非原子執行の気配リプレイ)の詳細ドキュメント
+├── PHASE11_NOTES.md               # Phase 11(OSEリアルタイム/L2 API能力ゲート)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3/4/6/7専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4/6/7/11専用の追加依存(ibapi)
 ├── .gitignore
 ├── config/
 │   └── phase9_venue_broker_evidence.example.json # Phase 9証拠JSONのテンプレート
@@ -80,7 +81,8 @@ kabuopu-arb-scan/
 │   ├── ibkr_paper_combo_test.py   # DU口座限定のペーパー約定実験(実弾口座には送信できない)
 │   ├── analyze_paper_combo_traces.py # Phase 7トレースのオフライン集計(IBKR接続なし)
 │   ├── evaluate_broker_confirmation.py # ベニュー/ブローカー証拠に基づく最終ゲート(IBKR接続なし)
-│   └── simulate_nonatomic_execution.py # レッグ別逐次約定の気配リプレイ(IBKR接続なし)
+│   ├── simulate_nonatomic_execution.py # レッグ別逐次約定の気配リプレイ(IBKR接続なし)
+│   └── ibkr_probe_marketdata_capability.py # OSEリアルタイムL1/L2データ能力の読み取り専用プローブ(発注系API一切なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -453,3 +455,40 @@ python scripts/simulate_nonatomic_execution.py \
 でください。出力は常に `phase10_live_money_allowed=False`、
 `phase10_atomicity_established=False`です。詳細は
 [`PHASE10_NOTES.md`](PHASE10_NOTES.md) を参照してください。
+
+### 12. (Phase 11) OSEリアルタイム/L2 APIの能力をゲートする
+
+Phase 10はトップオブブックの気配タッチ止まりで、キュー位置・約定確率は
+モデル化していません。より深い執行モデルを作る前に、実際のIBKR APIセッションが
+そのモデルに必要な市場データを提供できるかを確認する必要があります。IBKRの
+現行の料金ページは「Osaka Exchange (L1)」「Osaka Exchange (L2)」のリアルタイム
+購読を掲載する一方、過去のTWS APIドキュメントはOSEのAPIデータが遅延限定と
+述べていました。この食い違いは推測せず実測すべきものです。
+
+`ibkr_probe_marketdata_capability.py` は自分のTWS/IB Gatewayセッションに対して
+**読み取り専用**の能力プローブを実行します。`reqMktData`でL1を購読して権威ある
+`marketDataType`コールバックを記録し、`reqMktDepth(..., isSmartDepth=False)`で
+直接の板情報を要求し、両サイドかつ正のサイズを伴うcallbackが届くかを記録した後、
+市場データの購読のみをキャンセルします。**発注・変更・取消・What-If・口座取引の
+ロジックは一切含みません**(ソースに`placeOrder`/`cancelOrder`/`reqGlobalCancel`
+が存在しないことをテストでも保証しています)。
+
+```bash
+python scripts/ibkr_probe_marketdata_capability.py \
+  data/persistence_7203_new.csv \
+  --candidate-id '<candidate-id>' \
+  --exchange OSE.JPN \
+  --duration 8 \
+  --depth-rows 5 \
+  --output data/phase11_marketdata_probe.csv \
+  --summary-json data/phase11_marketdata_probe_summary.json
+```
+
+**全レッグ**が`REALTIME_L2_OBSERVED`の場合のみ`READY_FOR_L2_FILL_MODEL`となり、
+次に板情報ベースの約定モデルを検討する価値があることを意味します。ただし
+これもあくまでデータ能力の確認であり、キュー位置・約定確率・原子的執行・
+実際の収益性を証明するものではありません。遅延/frozenなL1や使える板情報が
+得られない場合は、IBKR経由の約定モデル化を止め、別のリアルタイムデータ源を
+検討してください。出力は常に `phase11_live_money_allowed=False`、
+`phase11_atomicity_established=False`です。詳細は
+[`PHASE11_NOTES.md`](PHASE11_NOTES.md) を参照してください。
