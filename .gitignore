@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 data/*.csv
 data/*.zip
+data/*.html
 .ipynb_checkpoints/
