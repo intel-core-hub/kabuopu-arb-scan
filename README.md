@@ -66,8 +66,9 @@ kabuopu-arb-scan/
 ├── PHASE11_NOTES.md               # Phase 11(OSEリアルタイム/L2 API能力ゲート)の詳細ドキュメント
 ├── PHASE12_NOTES.md               # Phase 12(表示気配タッチの持続性実測)の詳細ドキュメント
 ├── PHASE13_NOTES.md               # Phase 13(気配-約定整合性の検証)の詳細ドキュメント
+├── PHASE14_NOTES.md               # Phase 14(保守的レイテンシ予算オーバーレイ)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13/14専用の追加依存(ibapi)
 ├── .gitignore
 ├── config/
 │   └── phase9_venue_broker_evidence.example.json # Phase 9証拠JSONのテンプレート
@@ -88,7 +89,9 @@ kabuopu-arb-scan/
 │   ├── ibkr_record_depth_survival.py # OSE L2板情報の読み取り専用記録(発注系API一切なし)
 │   ├── analyze_touch_survival.py  # 表示気配タッチの持続性をオフライン分析(IBKR接続なし)
 │   ├── ibkr_record_touch_depletion.py # 気配枯渇とLast/Last Sizeの読み取り専用記録(発注系API一切なし)
-│   └── analyze_touch_depletion.py # 気配枯渇と約定printの整合性をオフライン分析(IBKR接続なし)
+│   ├── analyze_touch_depletion.py # 気配枯渇と約定printの整合性をオフライン分析(IBKR接続なし)
+│   ├── ibkr_measure_api_rtt.py    # reqCurrentTime往復時間の読み取り専用プローブ(発注系API一切なし)
+│   └── analyze_latency_budget.py  # Phase 12/13とRTT往復時間を統合する保守的予算分析(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -606,3 +609,62 @@ python scripts/analyze_touch_depletion.py \
 原因があり得るため)、裏付け率が高くても執行のレイテンシ・キュー優先度・
 マーケットインパクト・実際の約定確率を示すものではありません。詳細は
 [`PHASE13_NOTES.md`](PHASE13_NOTES.md) を参照してください。
+
+### 15. (Phase 14) 保守的なレイテンシ予算を重ね合わせる
+
+Phase 12は表示気配の持続時間を、Phase 13は気配枯渇と約定printの整合性を
+測定しますが、どちらも注文がOSEに到達するまでの時間は測定していません。
+TWS APIは仮想注文の取引所到達タイムスタンプを提供しないため、Phase 14は
+それを測定できるふりをしません。代わりに読み取り専用の`reqCurrentTime()`を
+繰り返し送信し、`currentTime()`コールバックまでのローカルなモノトニック
+経過時間を測定し、その高分位点(既定p95)を「コントロールプレーンRTTの
+代理指標」として扱います。**RTTは2で割りません**。片道時間の推定は一切
+行いません。
+
+`ibkr_measure_api_rtt.py`(読み取り専用)は`reqCurrentTime()`以外のAPIを
+一切使用しません。発注系呼び出しがないことを`grep`で確認済みで、RTTが
+どこでも半分にされていないことも確認済みです。
+
+`analyze_latency_budget.py`(完全オフライン)はPhase 12・Phase 13・
+Phase 14のRTT代理指標を組み合わせ、既定で「p95 RTT + 100msの安全マージン」
+を予算とします。各レッグについて、その予算**以上**で記録されている
+最小のPhase 12時間軸を選びます(例: 予算220msなら`survival_250ms`を使用し
+補間はしない)。持続率は時間軸に対して単調非増加のはずなので、切り上げは
+意図的に保守的な選択です。予算が記録済みの最大時間軸を超える場合は
+外挿せず、より長いPhase 12の再収集を要求します。
+
+```bash
+python scripts/ibkr_measure_api_rtt.py \
+  --host 127.0.0.1 \
+  --port 7497 \
+  --samples 50 \
+  --warmup 5 \
+  --interval-sec 0.5 \
+  --output data/phase14_api_rtt.csv \
+  --summary-json data/phase14_api_rtt_summary.json
+
+python scripts/analyze_latency_budget.py \
+  data/phase12_touch_survival.csv \
+  data/phase13_touch_depletion_summary.csv \
+  data/phase14_api_rtt.csv \
+  --latency-quantile 0.95 \
+  --extra-budget-ms 100 \
+  --min-survival 0.80 \
+  --min-complete-triggers 20 \
+  --min-depletions 5 \
+  --min-corroboration 0.50 \
+  --legs-output data/phase14_latency_legs.csv \
+  --output data/phase14_latency_candidates.csv \
+  --summary-json data/phase14_summary.json
+```
+
+最も強い判定`LATENCY_BUDGET_CANDIDATE_EXISTS`が意味するのは、保守的な
+コントロールプレーンRTT代理指標が過去に観測された表示気配の持続性に十分な
+頻度で収まっており、さらなる執行研究に進む価値がある、ということだけです。
+経路レイテンシ・キュー優先度・約定確率・原子的執行を証明するものでは
+**ありません**。`reqCurrentTime()`はコントロールプレーンのリクエストであり、
+気配データや発注とはサービス経路が異なりうる点にも注意してください。出力は
+常に `phase14_is_order_arrival_latency=False`、
+`phase14_is_exchange_latency=False`、`phase14_is_fill_probability=False`、
+`phase14_one_way_inference_used=False`、`phase14_live_money_allowed=False`
+です。詳細は [`PHASE14_NOTES.md`](PHASE14_NOTES.md) を参照してください。
