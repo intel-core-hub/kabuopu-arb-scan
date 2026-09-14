@@ -59,9 +59,14 @@ kabuopu-arb-scan/
 ├── PHASE5_NOTES.md                # Phase 5(複数セッション再現性ゲート)の詳細ドキュメント
 ├── PHASE6_NOTES.md                # Phase 6(IBKR What-If執行可能性調査)の詳細ドキュメント
 ├── PHASE7_NOTES.md                # Phase 7(ペーパー口座コンボ約定メカニズム実験)の詳細ドキュメント
+├── PHASE8_NOTES.md                # Phase 8(複数ペーパートレースの約定メカニズム集計)の詳細ドキュメント
+├── PHASE9_NOTES.md                # Phase 9(ベニュー/ブローカー確認ゲート)の詳細ドキュメント
+├── PHASE9_BROKER_QUESTIONS.md     # IBKRサポートへ確認すべき質問リスト
 ├── requirements.txt
 ├── requirements-ibkr.txt          # Phase 3/4/6/7専用の追加依存(ibapi)
 ├── .gitignore
+├── config/
+│   └── phase9_venue_broker_evidence.example.json # Phase 9証拠JSONのテンプレート
 ├── scripts/
 │   ├── fetch_jpx_option_data.py   # JPXオプション理論価格データ取得(URL要確認)
 │   ├── option_arbitrage_scan.py   # 理論価格ベースの静的無裁定性スキャナ
@@ -72,7 +77,8 @@ kabuopu-arb-scan/
 │   ├── evaluate_persistence.py    # 複数セッションを集計する再現性ゲート(IBKR接続なし)
 │   ├── ibkr_execution_study.py    # IBKR What-Ifプレビューのみ(実発注は一切行わない)
 │   ├── ibkr_paper_combo_test.py   # DU口座限定のペーパー約定実験(実弾口座には送信できない)
-│   └── analyze_paper_combo_traces.py # Phase 7トレースのオフライン集計(IBKR接続なし)
+│   ├── analyze_paper_combo_traces.py # Phase 7トレースのオフライン集計(IBKR接続なし)
+│   └── evaluate_broker_confirmation.py # ベニュー/ブローカー証拠に基づく最終ゲート(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -366,3 +372,40 @@ Phase 8には意図的に`GO_LIVE`判定がありません。出力は常に
 繰り返しBAG-only fillが観測されても最大で`BROKER_CONFIRMATION_REQUIRED`に留め、
 live実験を設計する前にOSE/IBKRのrouting・guarantee semanticsを別途確認します。
 詳細は [`PHASE8_NOTES.md`](PHASE8_NOTES.md) を参照してください。
+
+### 10. (Phase 9) ベニュー/ブローカーの確認をゲートする
+
+Phase 8が繰り返し一貫したペーパーBAG約定を示しても、それだけではOSEでの
+ライブ原子的約定は証明されません。`evaluate_broker_confirmation.py` は
+Phase 8の候補サマリーと、レビュー済みのベニュー/ブローカー事実を記録した
+JSON(`config/phase9_venue_broker_evidence.json`)を突き合わせる、**完全
+オフライン**のゲートです。IBKRには一切接続しません。
+
+JPXの有価証券オプション契約仕様は現時点で「ストラテジー取引: 利用不可」と
+なっているため、`config/phase9_venue_broker_evidence.example.json` は
+venue側を`UNAVAILABLE`、broker側のOSE固有フィールドをすべて`UNKNOWN`で
+初期化しています。IBKRサポートへ確認すべき質問は
+[`PHASE9_BROKER_QUESTIONS.md`](PHASE9_BROKER_QUESTIONS.md) にまとめてあり、
+ケースID・回答は必ずこの証拠JSONに記録した上で更新してください(一般的な
+コンボ注文の説明だけではOSE個別株オプション固有の保証にはなりません)。
+
+```bash
+cp config/phase9_venue_broker_evidence.example.json \
+   config/phase9_venue_broker_evidence.json
+# 証拠JSONは権威ある一次情報でのみ更新してください
+
+python scripts/evaluate_broker_confirmation.py \
+  data/phase8_paper_candidate_summary.csv \
+  --evidence config/phase9_venue_broker_evidence.json \
+  --as-of-date 2026-09-14 \
+  --output data/phase9_broker_gate.csv \
+  --summary-json data/phase9_summary.json
+```
+
+venueが`UNAVAILABLE`のままbrokerが直接的な原子約定を主張した場合は
+`EVIDENCE_CONFLICT_MANUAL_ESCALATION`として自動判定せず矛盾を手動解決に
+回します。venueとbrokerの証拠がすべて`AVAILABLE`/`DIRECT_EXCHANGE`/`ATOMIC`
+で整合していても、到達するのは`MANUAL_LIVE_DESIGN_REVIEW_REQUIRED`までで、
+`GO_LIVE`は意図的に存在しません。出力は常に
+`phase9_live_money_allowed=False`、`phase9_atomicity_established=False`です。
+詳細は [`PHASE9_NOTES.md`](PHASE9_NOTES.md) を参照してください。
