@@ -70,8 +70,9 @@ kabuopu-arb-scan/
 ├── PHASE15_NOTES.md               # Phase 15(ペーパー注文ライフサイクルのタイミング)の詳細ドキュメント
 ├── PHASE16_NOTES.md               # Phase 16(気配持続性×ペーパー制御パスの重ね合わせ)の詳細ドキュメント
 ├── PHASE17_NOTES.md               # Phase 17(同期パッケージレベル気配持続性)の詳細ドキュメント
+├── PHASE18_NOTES.md               # Phase 18(イベント駆動の同期パッケージ持続区間)の詳細ドキュメント
 ├── requirements.txt
-├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13/14/15専用の追加依存(ibapi)
+├── requirements-ibkr.txt          # Phase 3/4/6/7/11/12/13/14/15/18専用の追加依存(ibapi)
 ├── .gitignore
 ├── config/
 │   └── phase9_venue_broker_evidence.example.json # Phase 9証拠JSONのテンプレート
@@ -98,7 +99,9 @@ kabuopu-arb-scan/
 │   ├── ibkr_measure_paper_order_lifecycle.py # DU口座限定のペーパー注文ライフサイクル計測(Phase 7の安全機構を再利用)
 │   ├── analyze_paper_order_lifecycle.py # ペーパー注文callbackタイミングをPhase 14予算と比較(IBKR接続なし)
 │   ├── analyze_end_to_end_touch_retention.py # Phase 12気配持続性とPhase 15ペーパータイミングを重ね合わせ(IBKR接続なし)
-│   └── analyze_synchronized_package_survival.py # Phase 4同期サンプルから全レッグ同時の気配持続性を直接測定(IBKR接続なし)
+│   ├── analyze_synchronized_package_survival.py # Phase 4同期サンプルから全レッグ同時の気配持続性を直接測定(IBKR接続なし)
+│   ├── ibkr_record_package_events.py # 全レッグ同時のIBKRストリーミングcallbackを読み取り専用記録(発注系API一切なし)
+│   └── analyze_event_driven_package_intervals.py # イベント駆動の同期パッケージ持続区間をオフライン再構成(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -833,3 +836,71 @@ Phase 16の判定が`TOUCH_RETAINS_THROUGH_PAPER_CONTROL_PATH_FOR_NEXT_RESEARCH`
 変化前に注文が到達したこと、全レッグが約定したこと、マーケットインパクト後も
 非原子執行が利益を生むことは一切示しません。詳細は
 [`PHASE17_NOTES.md`](PHASE17_NOTES.md) を参照してください。
+
+### 19. (Phase 18) イベント駆動で同期パッケージの持続区間を測定する
+
+Phase 17は同期・固定周期(約500ms)のPhase 4サンプルを使いますが、この周期では
+サンプル間の気配変化を見落とす可能性があります。Phase 18はこれを解消するため、
+候補の全レッグのIBKRストリーミングcallbackを同時に読み取り専用で記録し、
+オフラインで**ローカル観測ベースのイベント駆動パッケージ有効区間**を再構成
+します。
+
+これも意図的に研究指標にとどめています: ローカルAPI callback受信時刻に基づく
+ものであり、取引所側のタイムスタンプではなく、約定確率でも注文到達確率でも
+原子的執行の証拠でもありません。発注・変更・キャンセルは一切行わず、
+`cancelMktData`は気配データ購読を停止するだけです。
+
+**記録(`ibkr_record_package_events.py`)** はPhase 17の判定
+`SYNCHRONIZED_PACKAGE_TOUCH_ROBUST_ENOUGH_FOR_NEXT_RESEARCH`を得た候補である
+ことを要求し、Phase 4の該当行から原資産・満期・`legs_json`・floor PV・
+ロットサイズ・手数料前提を復元します。各レッグのbid/ask価格・サイズ・
+`marketDataType`のcallbackをローカルの単調増加経過時間と共に記録します。
+ウォームアップcallbackは状態のシードにのみ使い、採点対象区間は
+`ANALYSIS_START`/`ANALYSIS_END`マーカーで明示的に区切ります(発注系APIが
+一切存在しないことを`grep`で確認済み: `placeOrder`/`cancelOrder`/
+`reqGlobalCancel`はいずれも不使用)。
+
+```bash
+python scripts/ibkr_record_package_events.py \
+  data/phase17_package_candidates.csv \
+  --phase4-input data/persistence_7203_new.csv \
+  --candidate-id '<candidate-id>' \
+  --duration 30 \
+  --output data/phase18_events_001.csv \
+  --summary-json data/phase18_recording_001.json
+```
+
+**オフライン再構成(`analyze_event_driven_package_intervals.py`)** は、
+callback受信時刻に加えて価格・サイズ更新の最終更新からの経過が
+`--max-state-age-sec`を超える**合成的な陳腐化境界**でも区間を分割するため、
+後続callbackが来ないまま気配が無期限に有効扱いされることはありません。
+パッケージは全レッグが同時に「実際の`market_data_type == 1`」「執行可能側
+(BUYはask、SELLはbid)が存在」「表示サイズがレッグ数量以上」「価格・サイズ
+更新が`max_state_age_sec`以内」「手数料控除後の正のエッジ」を満たす間だけ
+有効です(`ibapi`のimportや発注・気配データAPI呼び出しがないことを
+`analyze_event_driven_package_intervals.py`側でも`grep`で確認済み)。
+
+```bash
+python scripts/analyze_event_driven_package_intervals.py \
+  data/phase17_package_candidates.csv \
+  --event-inputs 'data/phase18_events_*.csv' \
+  --max-state-age-sec 3 \
+  --target-interval-sec 1 \
+  --min-valid-time-ratio 0.80 \
+  --sessions-output data/phase18_sessions.csv \
+  --intervals-output data/phase18_intervals.csv \
+  --output data/phase18_candidates.csv \
+  --summary-json data/phase18_summary.json
+```
+
+既定のゲートは、少なくとも3セッションの利用可能なイベント駆動記録、
+セッションあたり最低20 callback行、有効パッケージ時間比率のセッション
+ブートストラップ下限が0.80以上、かつセッションの2/3以上で1秒以上持続する
+有効区間が1つ以上あることです。これを満たすと最も強い判定
+`EVENT_DRIVEN_PACKAGE_INTERVALS_ROBUST_ENOUGH_FOR_NEXT_RESEARCH`が出ますが、
+これはライブ取引の承認ではありません。合格が意味するのは、ローカルAPI
+callbackストリーム上で、表示実行可能パッケージ全体がlive・十分なサイズ・
+新鮮・正のエッジを保った状態で十分な長さのイベント駆動区間が複数セッションに
+わたって観測された、ということだけです。取引所の板がcallback間で連続して
+変化しなかったこと、注文が約定したことは一切証明しません。詳細は
+[`PHASE18_NOTES.md`](PHASE18_NOTES.md) を参照してください。
