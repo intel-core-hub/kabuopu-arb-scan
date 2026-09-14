@@ -40,8 +40,68 @@ class LiveQuote:
     ask: Optional[float] = None
     bid_size: Optional[float] = None
     ask_size: Optional[float] = None
+    market_data_type: Optional[int] = None
     first_update_utc: Optional[str] = None
     last_update_utc: Optional[str] = None
+
+MARKET_DATA_TYPE_NAMES = {
+    1: "live",
+    2: "frozen",
+    3: "delayed",
+    4: "delayed-frozen",
+}
+
+
+def market_data_type_name(value: Optional[int]) -> str:
+    if value is None:
+        return "unknown"
+    return MARKET_DATA_TYPE_NAMES.get(int(value), f"unknown-{value}")
+
+
+def actual_market_data_types(quotes: dict[tuple[str, float], LiveQuote]) -> list[int]:
+    return sorted({int(q.market_data_type) for q in quotes.values() if q.market_data_type is not None})
+
+
+def positive_validation_status(
+    quotes: dict[tuple[str, float], LiveQuote],
+) -> str:
+    """Classify a positive edge by the data type IBKR actually delivered.
+
+    Only an all-live snapshot is allowed to become CONFIRMED_CANDIDATE.  Frozen or
+    delayed data remains a research candidate, while a missing marketDataType
+    callback is explicitly unverified rather than silently treated as live.
+    """
+    types = actual_market_data_types(quotes)
+    if not types:
+        return "UNVERIFIED_DATA_TYPE"
+    if types == [1]:
+        return "CONFIRMED_CANDIDATE"
+    return "NONLIVE_CANDIDATE"
+
+
+def apply_tick_price(quote: LiveQuote, tick_type: int, price: Any) -> bool:
+    """Apply live or delayed bid/ask tickPrice values.
+
+    Returns True only when the tick updated an executable bid/ask field.
+    """
+    if tick_type in {1, 66}:  # BID / DELAYED_BID
+        quote.bid = _finite(price)
+        return True
+    if tick_type in {2, 67}:  # ASK / DELAYED_ASK
+        quote.ask = _finite(price)
+        return True
+    return False
+
+
+def apply_tick_size(quote: LiveQuote, tick_type: int, size: Any) -> bool:
+    """Apply live or delayed bid/ask tickSize values."""
+    if tick_type in {0, 69}:  # BID_SIZE / DELAYED_BID_SIZE
+        quote.bid_size = _finite(size)
+        return True
+    if tick_type in {3, 70}:  # ASK_SIZE / DELAYED_ASK_SIZE
+        quote.ask_size = _finite(size)
+        return True
+    return False
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -157,6 +217,8 @@ def _quote_json(legs: list[Leg], quotes: dict[tuple[str, float], LiveQuote]) -> 
             "ask": q.ask,
             "bid_size": q.bid_size,
             "ask_size": q.ask_size,
+            "market_data_type": q.market_data_type,
+            "market_data_type_name": market_data_type_name(q.market_data_type),
             "first_update_utc": q.first_update_utc,
             "last_update_utc": q.last_update_utc,
         })
@@ -232,25 +294,23 @@ def make_ibkr_app():
         def contractDetailsEnd(self, reqId):  # noqa: N802, ANN001
             self.contract_done.setdefault(reqId, threading.Event()).set()
 
+        def marketDataType(self, reqId, marketDataType):  # noqa: N802, ANN001
+            q = self.market_rows.setdefault(reqId, LiveQuote())
+            q.market_data_type = int(marketDataType)
+
         def tickPrice(self, reqId, tickType, price, attrib=None):  # noqa: N802, ANN001, ARG002
             q = self.market_rows.setdefault(reqId, LiveQuote())
-            now = _utc_now_iso()
-            q.first_update_utc = q.first_update_utc or now
-            q.last_update_utc = now
-            if tickType == 1:  # BID
-                q.bid = _finite(price)
-            elif tickType == 2:  # ASK
-                q.ask = _finite(price)
+            if apply_tick_price(q, int(tickType), price):
+                now = _utc_now_iso()
+                q.first_update_utc = q.first_update_utc or now
+                q.last_update_utc = now
 
         def tickSize(self, reqId, tickType, size):  # noqa: N802, ANN001
             q = self.market_rows.setdefault(reqId, LiveQuote())
-            now = _utc_now_iso()
-            q.first_update_utc = q.first_update_utc or now
-            q.last_update_utc = now
-            if tickType == 0:  # BID_SIZE
-                q.bid_size = _finite(size)
-            elif tickType == 3:  # ASK_SIZE
-                q.ask_size = _finite(size)
+            if apply_tick_size(q, int(tickType), size):
+                now = _utc_now_iso()
+                q.first_update_utc = q.first_update_utc or now
+                q.last_update_utc = now
 
         def tickSnapshotEnd(self, reqId):  # noqa: N802, ANN001
             self.market_done.setdefault(reqId, threading.Event()).set()
@@ -376,8 +436,14 @@ def validate_findings(
             base["snapshot_skew_ms"] = _snapshot_skew_ms(live)
             base["ibkr_exchange"] = exchange
             base["ibkr_market_data_type"] = market_data_type
+            actual_types = actual_market_data_types(live)
+            base["ibkr_actual_market_data_types"] = json.dumps(actual_types, separators=(",", ":"))
+            base["ibkr_actual_market_data_type_names"] = ",".join(
+                market_data_type_name(x) for x in actual_types
+            ) or "unknown"
             base["validation_status"] = (
-                "CONFIRMED_CANDIDATE" if metrics["live_net_edge_per_contract"] > 0
+                positive_validation_status(live)
+                if metrics["live_net_edge_per_contract"] > 0
                 else "NO_LONGER_POSITIVE"
             )
             base["validation_error"] = ""

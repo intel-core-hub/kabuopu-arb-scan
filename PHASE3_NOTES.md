@@ -6,7 +6,7 @@ Phase 2 can find static-arbitrage candidates in the public JPX-linked quote boar
 
 ## Why this is the next step
 
-JPX explicitly warns that the public kabu-opu price page is delayed by about 15 minutes and directs users to their broker for real-time quotes. IBKR's TWS API supports option contract discovery and `reqMktData` snapshots. IBKR currently lists `OSE.JPN` as the IB exchange name for Osaka Exchange market data; current Japan stock-option commission tables also exist, but fees and account configuration should be checked in the actual account before interpreting an edge as tradeable.
+JPX explicitly warns that the public kabu-opu price page is delayed by about 15 minutes and directs users to their broker for real-time quotes. IBKR's TWS API supports option contract discovery and `reqMktData` snapshots. IBKR currently lists `OSE.JPN` as the IB exchange name for Osaka Exchange market data and lists an Osaka Exchange real-time subscription. Current IBKR documentation also distinguishes the market-data type actually delivered (live, frozen, delayed, delayed-frozen). Phase 3 therefore records the actual callback instead of assuming that a request for live data was fulfilled as live.
 
 References:
 
@@ -15,6 +15,8 @@ References:
 - IBKR Campus, market data via Python: https://ibkrcampus.com/campus/trading-lessons/python-receiving-market-data/
 - IBKR Japan market-data pricing / exchange codes: https://www.interactivebrokers.co.jp/en/pricing/market-data-pricing.php
 - IBKR option commissions: https://www.interactivebrokers.com/en/pricing/commissions-options.php?region=asia-pacific
+- IBKR market-data availability codes: https://ibkrcampus.com/docs/web-api/v1/endpoints/market-data/market-data-availability
+- IBKR delayed TWS tick IDs: https://interactivebrokers.github.io/tws-api/tick_types.html
 
 ## Scanner output change
 
@@ -79,9 +81,13 @@ python scripts/ibkr_validate_findings.py \
 
 Output status:
 
-- `CONFIRMED_CANDIDATE`: still positive after the configured per-contract fee/slippage allowance at the received IBKR bid/ask sides
-- `NO_LONGER_POSITIVE`: delayed-board edge disappeared
+- `CONFIRMED_CANDIDATE`: positive after the configured per-contract fee/slippage allowance **and every leg was explicitly reported by IBKR as live market data**
+- `NONLIVE_CANDIDATE`: positive edge remains, but at least one leg was frozen/delayed/delayed-frozen; this is research-only and must not be treated as a live confirmation
+- `UNVERIFIED_DATA_TYPE`: positive edge remains, but IBKR did not provide a market-data-type callback; the script refuses to silently assume live data
+- `NO_LONGER_POSITIVE`: the edge disappeared at the received executable sides
 - `ERROR`: contract ambiguity, missing quote side, API/permission issue, etc.
+
+`ibkr_actual_market_data_types` and `ibkr_actual_market_data_type_names` report what IBKR actually delivered. `live_quotes_json` also stores the data type per leg. Delayed TWS ticks (66/67/69/70) are parsed so `--market-data-type delayed` remains useful for diagnostics without ever being mislabeled as a live confirmation.
 
 `live_min_quote_size` accounts for leg quantity (for example, a butterfly body quoted for 12 contracts supports at most 6 complete 1:-2:1 packages).
 
@@ -95,7 +101,7 @@ Adjusted option series after corporate actions can also be ambiguous. The valida
 
 ## What counts as a GO signal
 
-A `CONFIRMED_CANDIDATE` is still only a research hit. Before execution, verify at minimum:
+A `CONFIRMED_CANDIDATE` is still only a research hit. It now means the edge was positive and IBKR explicitly identified all received leg data as live. Before execution, verify at minimum:
 
 1. all required sizes are simultaneously displayed;
 2. the contract multiplier / lot size matches the candidate calculation;

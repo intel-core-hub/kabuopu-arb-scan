@@ -137,5 +137,43 @@ class LiveRepricingTests(unittest.TestCase):
             )
 
 
+class MarketDataTypeTests(unittest.TestCase):
+    def test_delayed_tick_ids_populate_executable_quote(self):
+        q = livemod.LiveQuote()
+        self.assertTrue(livemod.apply_tick_price(q, 66, 12.5))
+        self.assertTrue(livemod.apply_tick_price(q, 67, 13.0))
+        self.assertTrue(livemod.apply_tick_size(q, 69, 7))
+        self.assertTrue(livemod.apply_tick_size(q, 70, 9))
+        self.assertEqual(12.5, q.bid)
+        self.assertEqual(13.0, q.ask)
+        self.assertEqual(7.0, q.bid_size)
+        self.assertEqual(9.0, q.ask_size)
+
+    def test_irrelevant_tick_does_not_update_quote(self):
+        q = livemod.LiveQuote()
+        self.assertFalse(livemod.apply_tick_price(q, 4, 99.0))  # last price
+        self.assertFalse(livemod.apply_tick_size(q, 5, 12))  # last size
+        self.assertIsNone(q.bid)
+        self.assertIsNone(q.ask)
+
+    def test_positive_edge_requires_actual_live_type_for_confirmation(self):
+        live = {("C", 100.0): livemod.LiveQuote(market_data_type=1)}
+        delayed = {("C", 100.0): livemod.LiveQuote(market_data_type=3)}
+        mixed = {
+            ("C", 100.0): livemod.LiveQuote(market_data_type=1),
+            ("C", 110.0): livemod.LiveQuote(market_data_type=3),
+        }
+        unknown = {("C", 100.0): livemod.LiveQuote()}
+        self.assertEqual("CONFIRMED_CANDIDATE", livemod.positive_validation_status(live))
+        self.assertEqual("NONLIVE_CANDIDATE", livemod.positive_validation_status(delayed))
+        self.assertEqual("NONLIVE_CANDIDATE", livemod.positive_validation_status(mixed))
+        self.assertEqual("UNVERIFIED_DATA_TYPE", livemod.positive_validation_status(unknown))
+
+    def test_market_data_type_names(self):
+        self.assertEqual("live", livemod.market_data_type_name(1))
+        self.assertEqual("delayed", livemod.market_data_type_name(3))
+        self.assertEqual("unknown", livemod.market_data_type_name(None))
+
+
 if __name__ == "__main__":
     unittest.main()

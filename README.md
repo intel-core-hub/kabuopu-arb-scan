@@ -153,9 +153,15 @@ python scripts/ibkr_validate_findings.py \
   --output data/live_validation_7203.csv
 ```
 
-`CONFIRMED_CANDIDATE`(手数料考慮後もライブ気配で正のエッジが残る)、
-`NO_LONGER_POSITIVE`(遅延ボードのエッジが消失)、`ERROR`(銘柄特定失敗・
-気配欠落等)のいずれかを出力します。`CONFIRMED_CANDIDATE` はあくまで研究上の
-候補であり、発注前に数量・乗数・手数料・空売り可否・再取得での再現性・
-複数レッグ約定リスクを必ず確認してください。詳細は
-[`PHASE3_NOTES.md`](PHASE3_NOTES.md) を参照してください。
+- `CONFIRMED_CANDIDATE`: 手数料考慮後も正のエッジが残り、かつ**全レッグがIBKRから
+  明示的にliveと報告された**場合のみ
+- `NONLIVE_CANDIDATE`: 正のエッジは残るが、いずれかのレッグがfrozen/delayed/
+  delayed-frozenだった場合(研究用の参考値であり、ライブ確認扱いにしない)
+- `UNVERIFIED_DATA_TYPE`: 正のエッジは残るが、IBKRからmarketDataTypeの
+  コールバックが得られず、live/非liveを判定できなかった場合
+- `NO_LONGER_POSITIVE`: 受信した実行可能気配でエッジが消失した場合
+- `ERROR`: 銘柄特定失敗・気配欠落・API/権限エラー等
+
+`CONFIRMED_CANDIDATE` はあくまで研究上の候補であり、発注前に数量・乗数・
+手数料・空売り可否・再取得での再現性・複数レッグ約定リスクを必ず確認して
+ください。詳細は [`PHASE3_NOTES.md`](PHASE3_NOTES.md) を参照してください。
