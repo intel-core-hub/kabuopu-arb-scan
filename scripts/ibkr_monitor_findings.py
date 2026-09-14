@@ -151,8 +151,9 @@ def sample_candidate(
     size_times: list[float] = []
     fee_legs = 0
     data_types: list[int] = []
+    leg_snapshots: list[dict[str, Any]] = []
 
-    for leg in legs:
+    for leg_index, leg in enumerate(legs):
         quote = quotes.get(leg.key)
         if quote is None:
             return {"sample_status": "MISSING_QUOTE"}
@@ -179,7 +180,22 @@ def sample_candidate(
             }
         if quote.market_data_type is None:
             return {"sample_status": "UNVERIFIED_DATA_TYPE"}
-        data_types.append(int(quote.market_data_type))
+        data_type = int(quote.market_data_type)
+        data_types.append(data_type)
+        leg_snapshots.append({
+            "leg_index": leg_index,
+            "action": leg.action,
+            "option_type": leg.option_type,
+            "strike": float(leg.strike),
+            "qty": int(leg.qty),
+            "executable_side": "ASK" if leg.action == "BUY" else "BID",
+            "executable_price": float(px),
+            "executable_size": float(size),
+            "price_age_ms": age * 1000.0,
+            "size_age_ms": size_age * 1000.0,
+            "market_data_type": data_type,
+            "market_data_type_name": market_data_type_name(data_type),
+        })
 
         if leg.action == "BUY":
             debit += leg.qty * float(px)
@@ -217,6 +233,7 @@ def sample_candidate(
         "side_skew_ms": side_skew_ms,
         "actual_market_data_types": json.dumps(unique_types, separators=(",", ":")),
         "actual_market_data_type_names": ",".join(market_data_type_name(x) for x in unique_types),
+        "leg_snapshots": leg_snapshots,
     }
 
 
@@ -419,6 +436,7 @@ def monitor_one(
         candidate_fee = _finite(finding.get("fee_per_contract_leg"))
     if candidate_fee is None:
         candidate_fee = 0.0
+    base["effective_fee_per_contract_leg"] = float(candidate_fee)
 
     req_for_key = subscribe_quotes(app, contracts, market_data_type=market_data_type)
     samples: list[dict[str, Any]] = []

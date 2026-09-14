@@ -62,6 +62,7 @@ kabuopu-arb-scan/
 ├── PHASE8_NOTES.md                # Phase 8(複数ペーパートレースの約定メカニズム集計)の詳細ドキュメント
 ├── PHASE9_NOTES.md                # Phase 9(ベニュー/ブローカー確認ゲート)の詳細ドキュメント
 ├── PHASE9_BROKER_QUESTIONS.md     # IBKRサポートへ確認すべき質問リスト
+├── PHASE10_NOTES.md               # Phase 10(非原子執行の気配リプレイ)の詳細ドキュメント
 ├── requirements.txt
 ├── requirements-ibkr.txt          # Phase 3/4/6/7専用の追加依存(ibapi)
 ├── .gitignore
@@ -78,7 +79,8 @@ kabuopu-arb-scan/
 │   ├── ibkr_execution_study.py    # IBKR What-Ifプレビューのみ(実発注は一切行わない)
 │   ├── ibkr_paper_combo_test.py   # DU口座限定のペーパー約定実験(実弾口座には送信できない)
 │   ├── analyze_paper_combo_traces.py # Phase 7トレースのオフライン集計(IBKR接続なし)
-│   └── evaluate_broker_confirmation.py # ベニュー/ブローカー証拠に基づく最終ゲート(IBKR接続なし)
+│   ├── evaluate_broker_confirmation.py # ベニュー/ブローカー証拠に基づく最終ゲート(IBKR接続なし)
+│   └── simulate_nonatomic_execution.py # レッグ別逐次約定の気配リプレイ(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -409,3 +411,45 @@ venueが`UNAVAILABLE`のままbrokerが直接的な原子約定を主張した�
 `GO_LIVE`は意図的に存在しません。出力は常に
 `phase9_live_money_allowed=False`、`phase9_atomicity_established=False`です。
 詳細は [`PHASE9_NOTES.md`](PHASE9_NOTES.md) を参照してください。
+
+### 11. (Phase 10) 非原子執行を気配リプレイで検証する
+
+Phase 9は現行のベニュー証拠(「ストラテジー取引: 利用不可」)の下で取引所
+ネイティブな原子コンボという仮説をブロックします。Phase 10はそのゲートを
+回避しようとするものでは**ありません**。個別レッグ執行を別の非原子的な
+研究トラックとして扱い、より狭い問いだけを検証します:
+
+> 同時サンプルで利益が出て見えたパッケージは、レッグを1本ずつ遅延を
+> 挟んで約定させた場合でもエッジが残るか?
+
+`ibkr_monitor_findings.py`(Phase 4)が `monitor_samples_json` の各サンプルに
+`leg_snapshots`(レッグ別の実行可能価格・サイズ・鮮度・実際のIBKRデータ種別)を
+記録するようになりました。`simulate_nonatomic_execution.py` はこれと
+Phase 9の候補CSVを読み、レッグ順序の総当たり(`--max-permutations`まで)で
+逐次約定パスをオフライン再計算します。**IBKRには一切接続しません**。
+過去のPhase 4 CSVにはこのフィールドがないため、再収集していないデータは
+`NEEDS_PHASE4_RECOLLECTION`として扱われます。
+
+```bash
+# このパッチ適用後にPhase 4データを再収集してから実行
+python scripts/simulate_nonatomic_execution.py \
+  data/phase9_broker_gate.csv \
+  --phase4-inputs 'data/persistence_*.csv' \
+  --leg-delay-sec 0.5 \
+  --extra-slippage-per-contract-leg 100 \
+  --output data/phase10_nonatomic_candidates.csv \
+  --sessions-output data/phase10_nonatomic_sessions.csv \
+  --paths-output data/phase10_nonatomic_paths.csv \
+  --summary-json data/phase10_summary.json
+```
+
+これは**気配タッチのリプレイであり、約定シミュレータではありません**。
+キュー位置・約定確率・サンプル間の気配取消・隠れ流動性・マーケットインパクト・
+1レッグの約定が他レッグの価格に与える影響は一切モデル化していません。正の
+結果は「表示されたトップオブブックのエッジが単純な逐次価格ストレスに耐えた」
+という証拠に過ぎず、実際に執行可能・利益が出ることの証明ではありません。
+`--leg-delay-sec` や `--extra-slippage-per-contract-leg` を変えた感度分析を
+必ず行い、遅延ゼロ近辺でしか残らない結果は頑健な非原子エッジとして扱わない
+でください。出力は常に `phase10_live_money_allowed=False`、
+`phase10_atomicity_established=False`です。詳細は
+[`PHASE10_NOTES.md`](PHASE10_NOTES.md) を参照してください。
