@@ -13,6 +13,7 @@ import json
 import math
 import threading
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -421,6 +422,7 @@ def monitor_one(
 
     req_for_key = subscribe_quotes(app, contracts, market_data_type=market_data_type)
     samples: list[dict[str, Any]] = []
+    monitor_started_at_utc = datetime.now(timezone.utc).isoformat()
     try:
         if warmup_sec > 0:
             time.sleep(warmup_sec)
@@ -450,8 +452,11 @@ def monitor_one(
     finally:
         cancel_quotes(app, req_for_key)
 
+    monitor_finished_at_utc = datetime.now(timezone.utc).isoformat()
     summary = summarize_samples(samples, sample_interval_sec)
     base.update(summary)
+    base["monitor_started_at_utc"] = monitor_started_at_utc
+    base["monitor_finished_at_utc"] = monitor_finished_at_utc
     base["monitor_duration_sec"] = duration_sec
     base["sample_interval_sec"] = sample_interval_sec
     base["warmup_sec"] = warmup_sec

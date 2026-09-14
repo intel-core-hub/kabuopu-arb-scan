@@ -55,6 +55,7 @@ kabuopu-arb-scan/
 ├── PHASE2_NOTES.md                # Phase 2(気配値ベース検査)の詳細ドキュメント
 ├── PHASE3_NOTES.md                # Phase 3(IBKRライブ再検証)の詳細ドキュメント
 ├── PHASE4_NOTES.md                # Phase 4(同時ストリーミング持続性検査)の詳細ドキュメント
+├── PHASE5_NOTES.md                # Phase 5(複数セッション再現性ゲート)の詳細ドキュメント
 ├── requirements.txt
 ├── requirements-ibkr.txt          # Phase 3/4専用の追加依存(ibapi)
 ├── .gitignore
@@ -64,7 +65,8 @@ kabuopu-arb-scan/
 │   ├── fetch_kabuopu_quotes.py    # かぶオプ気配値ボード(15分遅延)取得
 │   ├── quote_arbitrage_scan.py    # 気配値(bid/ask)ベースの静的無裁定性スキャナ
 │   ├── ibkr_validate_findings.py  # IBKRライブ気配での単発再検証(発注は一切行わない)
-│   └── ibkr_monitor_findings.py   # IBKR同時ストリーミングでの持続性検査(発注は一切行わない)
+│   ├── ibkr_monitor_findings.py   # IBKR同時ストリーミングでの持続性検査(発注は一切行わない)
+│   └── evaluate_persistence.py    # 複数セッションを集計する再現性ゲート(IBKR接続なし)
 ├── tests/                         # 上記スクリプトの単体テスト
 └── data/                          # 取得したデータの置き場(gitignore対象)
 ```
@@ -199,3 +201,38 @@ frozen/delayedな気配がliveとして扱われることはなく、古くな�
 サイズは持ち越さずに除外されます。表示サイズが不足・欠落している観測もlive陽性
 としてカウントしません。これも研究シグナルであり執行保証ではないため、詳細は
 [`PHASE4_NOTES.md`](PHASE4_NOTES.md) を参照してください。
+
+### 6. (Phase 5) 複数セッションにまたがる再現性を評価する
+
+Phase 4は「今回の短い監視時間だけ」の持続性しか答えません。`evaluate_persistence.py`
+は複数回実行したPhase 4のCSV(またはglobパターン)を集計し、同一候補が独立した
+セッションを跨いで再現するかを判定します。**IBKRには一切接続しない**、完全に
+オフラインの集計・分析ツールです。
+
+```bash
+# Phase 4を複数回実行し、実行の都度別ファイルに保存
+python scripts/ibkr_monitor_findings.py data/findings_mm50.csv \
+  --market-data-type live --exchange OSE.JPN --limit 10 --duration 10 \
+  --output data/persistence_20260914_1200.csv
+
+# 何回か蓄積したら集計
+python scripts/evaluate_persistence.py 'data/persistence_*.csv' \
+  --min-sessions 3 \
+  --min-persistent-sessions 2 \
+  --min-edge-jpy 1000 \
+  --output data/reproducibility_ranking.csv \
+  --summary-json data/reproducibility_summary.json
+```
+
+- `PROMOTE_TO_EXECUTION_STUDY`: セッション数・持続性・エッジ・サイズ・気配同期の
+  各ゲートを全て満たした場合(「執行メカニズムを検討する価値がある」であり
+  「発注してよい」ではない)
+- `KEEP_OBSERVING`: 陽性の証拠はあるが、いずれかのゲートが未達
+- `INSUFFICIENT_EVIDENCE`: 有効なセッション数がまだ足りない
+- `NO_REPRODUCIBLE_LIVE_EDGE`: 十分なセッションがあるがlive陽性が一度もない
+
+複数日にまたがる証拠を求める場合は `--min-distinct-days` を(例えば3に)上げて
+ください。`PROMOTE_TO_EXECUTION_STUDY` になった候補も研究上のハンドオフに
+過ぎません。約定の非原子性・表示サイズの消失・手数料・証拠金・乗数・権利行使/
+割当メカニズム等は別途必ず検証してください。詳細は
+[`PHASE5_NOTES.md`](PHASE5_NOTES.md) を参照してください。
